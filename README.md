@@ -16,12 +16,6 @@ A curated collection of production-ready AI skills for Claude Code — built for
 
 All three skills share common checks for **accessibility**, **Firebase**, **snapshot testing**, **security**, **performance**, and **GitHub PR hygiene** — with architecture-specific checks unique to each.
 
-### Mobile Release
-
-| Skill | When to Use |
-|---|---|
-| [mobile-release-automation](skills/mobile-release-automation/) | Cutting a release: readiness checks, version bump, changelog, PR, CI, TestFlight, tagging |
-
 ### GitHub Operations
 
 | Skill | When to Use |
@@ -67,9 +61,6 @@ After installing, invoke skills by name in Claude Code:
 /swift-viper-code-review Sources/Modules/Login/
 /swift-viper-code-review PR #89
 
-# Release automation
-/mobile-release-automation 2.1.0
-
 # GitHub operations (branch, PR, CI)
 /github-operations
 ```
@@ -78,7 +69,6 @@ Or natural language:
 ```
 "Review my TCA changes before I open the PR."
 "Check the Dashboard MVVM module for architecture issues."
-"Prepare the 2.1.0 release from develop."
 ```
 
 ---
