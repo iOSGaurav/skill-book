@@ -22,6 +22,12 @@ All three skills share common checks for **accessibility**, **Firebase**, **snap
 |---|---|
 | [mobile-release-automation](skills/mobile-release-automation/) | Cutting a release: readiness checks, version bump, changelog, PR, CI, TestFlight, tagging |
 
+### GitHub Operations
+
+| Skill | When to Use |
+|---|---|
+| [github-operations](skills/github-operations/) | Branch creation, PR management, inline review comments, CI/CD monitoring, releases — all `gh` CLI workflows for mobile development |
+
 ---
 
 ## How to Install (Claude Code)
@@ -63,6 +69,9 @@ After installing, invoke skills by name in Claude Code:
 
 # Release automation
 /mobile-release-automation 2.1.0
+
+# GitHub operations (branch, PR, CI)
+/github-operations
 ```
 
 Or natural language:
