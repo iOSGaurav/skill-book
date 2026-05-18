@@ -1,0 +1,183 @@
+---
+# VIPER Presenter Layer Rules
+# Responsibility: Format data for display; coordinate View ↔ Interactor flow
+
+rule_set:
+  id: viper_presenter
+  name: VIPER — Presenter Layer
+  description: >
+    Rules for the Presenter layer in VIPER. The Presenter sits between the View
+    and the Interactor. It transforms domain data into display-ready view models,
+    decides when to show loading/error states, and delegates navigation to the Router.
+    It must have zero direct data access, zero UIKit layout code, and hold the View weakly.
+  enabled: always
+  layer: Presenter
+  naming_patterns: ["*Presenter", "*PresenterImpl", "*PresentationLogic"]
+
+checks:
+
+  PRES-001:
+    description: Presenter has zero direct data access (no network, no Firestore, no DB)
+    severity: CRITICAL
+    rationale: >
+      The Presenter's job is to format and coordinate — not to fetch data.
+      Direct data access in the Presenter bypasses the Interactor, breaking
+      the single-responsibility contract and making both layers untestable.
+    bad_example: |
+      class ProfilePresenter {
+          func viewDidLoad() {
+              // ❌ Presenter making Firestore call
+              Firestore.firestore()
+                  .collection("users")
+                  .document(uid)
+                  .getDocument { [weak self] snapshot, _ in
+                      self?.view?.display(name: snapshot?.data()?["name"] as? String ?? "")
+                  }
+          }
+      }
+    fix_example: |
+      class ProfilePresenter {
+          func viewDidLoad() {
+              view?.showLoading(true)
+              interactor?.fetchProfile(userId: currentUserId)  // ✅ delegates to Interactor
+          }
+
+          // Called by Interactor output:
+          func profileFetched(_ profile: UserProfile) {
+              view?.showLoading(false)
+              view?.display(ProfileViewModel(name: profile.displayName))
+          }
+      }
+
+  PRES-002:
+    description: Presenter has zero UIKit layout code
+    severity: HIGH
+    rationale: >
+      Laying out views (frame, addSubview, Auto Layout, UIColor) in the Presenter
+      violates its single responsibility. The Presenter should not know about
+      frames, colors, or layout constraints.
+    bad_example: |
+      func showError(_ message: String) {
+          let label = UILabel()
+          label.frame = CGRect(x: 0, y: 0, width: 200, height: 44)
+          label.text = message
+          view?.addSubview(label)   // ❌ UIKit layout in Presenter
+      }
+    fix_example: |
+      func showError(_ message: String) {
+          view?.showErrorBanner(message: message)  // ✅ View handles layout
+      }
+
+  PRES-003:
+    description: Presenter formats domain data into display view models before passing to View
+    severity: MEDIUM
+    rationale: >
+      Passing raw domain objects (User, Order) to the View forces the View to
+      interpret them. The Presenter should translate domain objects into
+      simple, display-ready structs.
+    bad_example: |
+      func orderFetched(_ order: Order) {
+          view?.display(order: order)   // ❌ View receives raw domain object
+      }
+    fix_example: |
+      struct OrderViewModel {
+          let title: String
+          let formattedPrice: String
+          let statusBadgeColor: String   // hex string — View converts to UIColor
+          let isDelivered: Bool
+      }
+
+      func orderFetched(_ order: Order) {
+          let vm = OrderViewModel(
+              title: order.productName,
+              formattedPrice: "$\(String(format: "%.2f", order.totalPrice))",
+              statusBadgeColor: order.isDelivered ? "#00AA00" : "#FF9900",
+              isDelivered: order.isDelivered
+          )
+          view?.display(order: vm)   // ✅ View receives ready-to-render ViewModel
+      }
+
+  PRES-004:
+    description: Presenter delegates navigation to Router via RouterProtocol
+    severity: HIGH
+    rationale: >
+      The Presenter should not know how to navigate — it delegates to the Router
+      via a protocol. This keeps navigation logic in one place and makes
+      the Presenter independently testable.
+    bad_example: |
+      func loginSucceeded() {
+          let vc = HomeBuilder.build()
+          viewController?.navigationController?.pushViewController(vc, animated: true)  // ❌ Presenter navigates
+      }
+    fix_example: |
+      func loginSucceeded() {
+          router?.navigateToHome()   // ✅ Router handles navigation
+      }
+
+  PRES-005:
+    description: Presenter holds View as weak var view — typed to ViewProtocol
+    severity: CRITICAL
+    rationale: >
+      The View owns the Presenter. If the Presenter also owns the View strongly,
+      neither can be released — retain cycle. The weak reference breaks the cycle.
+    bad_example: |
+      class LoginPresenter {
+          var view: LoginViewController?        // ❌ strong concrete type — retain cycle
+      }
+    fix_example: |
+      class LoginPresenter {
+          weak var view: LoginViewProtocol?     // ✅ weak + protocol type
+      }
+
+  PRES-006:
+    description: Presenter holds Router as var router typed to RouterProtocol
+    severity: MEDIUM
+    rationale: >
+      Typing router as a protocol allows mock injection in Presenter unit tests,
+      enabling navigation call verification without a real UINavigationController.
+    bad_example: |
+      class LoginPresenter {
+          var router: LoginRouter?   // ❌ concrete type
+      }
+    fix_example: |
+      class LoginPresenter {
+          var router: LoginRouterProtocol?  // ✅ protocol type
+      }
+
+  PRES-007:
+    description: Presenter is unit testable with mock View and mock Interactor
+    severity: HIGH
+    rationale: >
+      The Presenter contains coordination logic. Without tests using mock
+      dependencies, this logic has no coverage and regressions go undetected.
+    test_requirements:
+      - "Mock View must capture display calls for assertion"
+      - "Mock Interactor allows controlling output"
+      - "Mock Router allows verifying navigation calls"
+    fix_example: |
+      final class LoginPresenterTests: XCTestCase {
+          var sut: LoginPresenter!
+          var mockView: MockLoginView!
+          var mockInteractor: MockLoginInteractor!
+          var mockRouter: MockLoginRouter!
+
+          override func setUp() {
+              mockView = MockLoginView()
+              mockInteractor = MockLoginInteractor()
+              mockRouter = MockLoginRouter()
+              sut = LoginPresenter()
+              sut.view = mockView
+              sut.interactor = mockInteractor
+              sut.router = mockRouter
+          }
+
+          func testLoginSuccessNavigatesToHome() {
+              sut.loginSucceeded(user: .mock)
+              XCTAssertTrue(mockRouter.navigateToHomeCalled)
+          }
+
+          func testLoginFailureShowsError() {
+              sut.loginFailed(error: AuthError.invalidCredentials)
+              XCTAssertEqual(mockView.displayedErrorMessage, "Invalid email or password.")
+          }
+      }

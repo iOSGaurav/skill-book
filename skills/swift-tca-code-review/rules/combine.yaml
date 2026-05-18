@@ -1,0 +1,968 @@
+---
+# Combine Rules
+# Shared across all architecture skills (TCA, MVVM, VIPER)
+# Applies to any file importing Combine
+# Framework: Apple Combine (iOS 13+)
+
+rule_set:
+  id: combine
+  name: Combine
+  description: >
+    Correctness, memory safety, and performance rules for Apple Combine.
+    Covers subscription lifecycle, memory management, threading, error handling,
+    Subject usage, operator correctness, testability, binding patterns,
+    resilience, async/await integration, and common anti-patterns.
+  enabled: when_combine_imported
+  feature_flags: [Combine]
+  reference: https://developer.apple.com/documentation/combine
+
+  categories:
+    - memory_management      # COMBINE-001–003
+    - threading              # COMBINE-004–006
+    - error_handling         # COMBINE-007–009
+    - subjects               # COMBINE-010–012
+    - operators              # COMBINE-013–016
+    - testability            # COMBINE-017–018
+    - performance            # COMBINE-019–020
+    - binding_and_assign     # COMBINE-021–022  ← NEW
+    - operator_semantics     # COMBINE-023–025  ← NEW
+    - resilience             # COMBINE-026–027  ← NEW
+    - async_await_bridge     # COMBINE-028–030  ← NEW
+    - anti_patterns          # COMBINE-031–033  ← NEW
+
+# ============================================================
+# MEMORY MANAGEMENT
+# ============================================================
+
+checks:
+
+  COMBINE-001:
+    description: All subscriptions stored in Set<AnyCancellable> or assigned to AnyCancellable
+    severity: HIGH
+    category: memory_management
+    rationale: >
+      A subscription without an owner runs forever and keeps all captured
+      objects alive. The subscriber is the owner; it must store the cancellable
+      so the subscription is cancelled when the owner deallocates.
+    bad_example: |
+      class SearchViewModel: ObservableObject {
+          init() {
+              // ❌ Subscription floats — never cancelled, leaks self
+              $query
+                  .debounce(for: 0.3, scheduler: RunLoop.main)
+                  .sink { self.search($0) }
+          }
+      }
+    fix_example: |
+      class SearchViewModel: ObservableObject {
+          private var cancellables = Set<AnyCancellable>()
+
+          init() {
+              $query
+                  .debounce(for: 0.3, scheduler: RunLoop.main)
+                  .sink { [weak self] query in self?.search(query) }
+                  .store(in: &cancellables)   // ✅ owned, cancelled on deinit
+          }
+      }
+
+  COMBINE-002:
+    description: "[weak self] used in sink/handleEvents closures that capture self"
+    severity: HIGH
+    category: memory_management
+    rationale: >
+      Closures in sink/handleEvents are held by the upstream publisher.
+      A strong capture of `self` creates a retain cycle:
+      self → cancellables → subscription → closure → self.
+    bad_example: |
+      publisher
+          .sink { self.handleResult($0) }   // ❌ strong capture — retain cycle
+          .store(in: &cancellables)
+    fix_example: |
+      publisher
+          .sink { [weak self] result in
+              self?.handleResult(result)    // ✅ weak — no cycle
+          }
+          .store(in: &cancellables)
+
+  COMBINE-003:
+    description: Cancellables cancelled on deinit (via Set or explicit cancel())
+    severity: MEDIUM
+    category: memory_management
+    rationale: >
+      Long-lived objects (services, coordinators) that create subscriptions
+      must cancel them on deinit to release upstream resources and stop work.
+    guidance: >
+      Storing in Set<AnyCancellable> handles this automatically. For manual
+      control, call cancellable.cancel() in deinit.
+    fix_example: |
+      // Option 1: Automatic via Set (preferred)
+      private var cancellables = Set<AnyCancellable>()
+      // Set is deallocated on deinit → all subscriptions cancelled
+
+      // Option 2: Manual for precise control
+      private var timerCancellable: AnyCancellable?
+
+      deinit {
+          timerCancellable?.cancel()
+      }
+
+# ============================================================
+# THREADING
+# ============================================================
+
+  COMBINE-004:
+    description: UI updates received on RunLoop.main or DispatchQueue.main
+    severity: CRITICAL
+    category: threading
+    rationale: >
+      Network publishers, URLSession, and background schedulers deliver values
+      on background threads. Updating @Published properties or UIKit from a
+      background thread causes crashes or undefined behaviour.
+    bad_example: |
+      URLSession.shared.dataTaskPublisher(for: url)
+          .map { try JSONDecoder().decode(User.self, from: $0.data) }
+          .sink { [weak self] user in
+              self?.currentUser = user   // ❌ delivered on background thread
+          }
+          .store(in: &cancellables)
+    fix_example: |
+      URLSession.shared.dataTaskPublisher(for: url)
+          .map { try JSONDecoder().decode(User.self, from: $0.data) }
+          .receive(on: RunLoop.main)             // ✅ switch to main before sink
+          .sink { [weak self] user in
+              self?.currentUser = user
+          }
+          .store(in: &cancellables)
+
+  COMBINE-005:
+    description: ".receive(on:) placed as close to the subscriber as possible"
+    severity: LOW
+    category: threading
+    rationale: >
+      Each operator in a chain may run on a different thread.
+      Placing .receive(on: RunLoop.main) early means subsequent operators
+      (map, filter) also run on the main thread unnecessarily, blocking UI work.
+    bad_example: |
+      dataPublisher
+          .receive(on: RunLoop.main)    // ❌ too early — map/decode run on main
+          .map { try decode($0) }
+          .map { format($0) }
+          .sink { self.display($0) }
+          .store(in: &cancellables)
+    fix_example: |
+      dataPublisher
+          .map { try decode($0) }       // ✅ heavy work on background thread
+          .map { format($0) }
+          .receive(on: RunLoop.main)    // ✅ switch to main only before UI update
+          .sink { [weak self] in self?.display($0) }
+          .store(in: &cancellables)
+
+  COMBINE-006:
+    description: ".subscribe(on:) used to move upstream work off the main thread"
+    severity: MEDIUM
+    category: threading
+    rationale: >
+      By default, publishers run on whichever thread the subscription is created on.
+      For publishers that do I/O (file, DB), use .subscribe(on:) to move
+      the subscription work to a background scheduler.
+    guidance: >
+      subscribe(on:) affects the upstream (where the publisher runs).
+      receive(on:) affects the downstream (where the subscriber receives).
+      Use both for full control.
+    fix_example: |
+      filePublisher
+          .subscribe(on: DispatchQueue.global(qos: .background))  // upstream on BG
+          .receive(on: RunLoop.main)                               // sink on main
+          .sink { [weak self] data in self?.process(data) }
+          .store(in: &cancellables)
+
+# ============================================================
+# ERROR HANDLING
+# ============================================================
+
+  COMBINE-007:
+    description: Upstream errors handled — not swallowed with catch { Just(.empty) }
+    severity: HIGH
+    category: error_handling
+    rationale: >
+      Silently replacing errors with empty values hides failures from users
+      and makes debugging impossible. Every catch must at minimum log the error
+      or expose it through an error state.
+    bad_example: |
+      apiPublisher
+          .catch { _ in Just([]) }   // ❌ error silently swallowed
+          .sink { self.items = $0 }
+          .store(in: &cancellables)
+    fix_example: |
+      apiPublisher
+          .catch { [weak self] error -> Just<[Item]> in
+              logger.error("Item fetch failed: \(error)")
+              self?.errorMessage = "Failed to load items. Please try again."
+              return Just([])
+          }
+          .sink { [weak self] in self?.items = $0 }
+          .store(in: &cancellables)
+
+  COMBINE-008:
+    description: ".replaceError(with:)" only used when the fallback value is semantically correct
+    severity: MEDIUM
+    category: error_handling
+    rationale: >
+      .replaceError(with:) converts a failable publisher to an infallible one,
+      but it discards the error completely. Use only when a fallback value
+      is genuinely correct, not as a shortcut to silence errors.
+    bad_example: |
+      userPublisher
+          .replaceError(with: User.guest)   // ❌ auth errors silently produce a guest user
+          .assign(to: \.currentUser, on: self)
+          .store(in: &cancellables)
+    fix_example: |
+      userPublisher
+          .catch { [weak self] error -> AnyPublisher<User, Never> in
+              logger.error("Auth failed: \(error)")
+              self?.authError = error
+              return Just(User.guest).eraseToAnyPublisher()
+          }
+          .assign(to: \.currentUser, on: self)
+          .store(in: &cancellables)
+
+  COMBINE-009:
+    description: Publishers with Failure == Never used where error can't occur
+    severity: LOW
+    category: error_handling
+    rationale: >
+      Typing a publisher as AnyPublisher<T, Error> when it can never fail forces
+      all downstream operators to handle errors unnecessarily.
+      Use Failure == Never (via setFailureType or Just) for infallible publishers.
+    fix_example: |
+      // ❌ Unnecessarily fallible
+      var timer: AnyPublisher<Date, Error>
+
+      // ✅ Correctly infallible
+      var timer: AnyPublisher<Date, Never>
+
+# ============================================================
+# SUBJECTS
+# ============================================================
+
+  COMBINE-010:
+    description: PassthroughSubject used for events; CurrentValueSubject for state
+    severity: MEDIUM
+    category: subjects
+    rationale: >
+      PassthroughSubject has no stored value — subscribers only receive future
+      values. CurrentValueSubject stores the current value so new subscribers
+      get it immediately. Using the wrong one causes missed events or
+      stale initial state.
+    guidance: |
+      PassthroughSubject → one-shot events (button tap, network result, error)
+      CurrentValueSubject → stateful values (loading flag, user session, count)
+    bad_example: |
+      // ❌ PassthroughSubject for state — new subscribers miss current value
+      let isLoadingSubject = PassthroughSubject<Bool, Never>()
+
+      // ❌ CurrentValueSubject for one-shot event — event stored unnecessarily
+      let loginEventSubject = CurrentValueSubject<Void, Never>(())
+    fix_example: |
+      // ✅ State → CurrentValueSubject
+      let isLoadingSubject = CurrentValueSubject<Bool, Never>(false)
+
+      // ✅ Event → PassthroughSubject
+      let loginEventSubject = PassthroughSubject<Void, Never>()
+
+  COMBINE-011:
+    description: Subject.send(_:) not called from multiple threads without synchronisation
+    severity: HIGH
+    category: subjects
+    rationale: >
+      Combine subjects are not thread-safe. Calling .send() concurrently from
+      multiple threads is a data race and produces undefined behaviour.
+    bad_example: |
+      DispatchQueue.global().async { self.subject.send(1) }
+      DispatchQueue.global().async { self.subject.send(2) }  // ❌ data race
+    fix_example: |
+      // ✅ Serialise sends through a dedicated queue
+      private let subjectQueue = DispatchQueue(label: "com.app.subject")
+
+      func emit(_ value: Int) {
+          subjectQueue.async { self.subject.send(value) }
+      }
+
+  COMBINE-012:
+    description: Subject.send(completion:) called when the subject's lifecycle ends
+    severity: MEDIUM
+    category: subjects
+    rationale: >
+      A subject that never completes keeps all subscribers alive indefinitely.
+      Send a completion when no more values will be emitted (service shutdown, logout).
+    fix_example: |
+      func logout() {
+          userSubject.send(completion: .finished)  // ✅ releases all subscribers
+          cancellables.removeAll()
+      }
+
+# ============================================================
+# OPERATOR USAGE
+# ============================================================
+
+  COMBINE-013:
+    description: ".debounce" used for search/text input — not raw sink on every keystroke
+    severity: MEDIUM
+    category: operators
+    rationale: >
+      Without debounce, every keystroke fires a network request. Debounce
+      waits for a pause in input before emitting, reducing request volume.
+    bad_example: |
+      $searchQuery
+          .sink { [weak self] query in self?.search(query) }  // ❌ fires on every keystroke
+          .store(in: &cancellables)
+    fix_example: |
+      $searchQuery
+          .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+          .removeDuplicates()
+          .sink { [weak self] query in self?.search(query) }
+          .store(in: &cancellables)
+
+  COMBINE-014:
+    description: ".removeDuplicates()" used where re-emitting equal values causes redundant work
+    severity: LOW
+    category: operators
+    rationale: >
+      Publishers like @Published emit on every assignment, even when the value
+      does not change. removeDuplicates() prevents downstream work from running
+      when the value is unchanged.
+    fix_example: |
+      $selectedTab
+          .removeDuplicates()   // ✅ prevents re-render when same tab tapped twice
+          .sink { [weak self] tab in self?.switchTab(to: tab) }
+          .store(in: &cancellables)
+
+  COMBINE-015:
+    description: ".flatMap" / ".switchToLatest" used for request chaining — not nested sinks
+    severity: HIGH
+    category: operators
+    rationale: >
+      Nesting a .sink inside another .sink creates unmanaged subscriptions
+      that outlive the outer subscription and may fire multiple times.
+      Use flatMap (concurrent) or switchToLatest (cancel previous) instead.
+    bad_example: |
+      // ❌ Inner sink is unmanaged — cancellable not stored
+      $userId
+          .sink { [weak self] id in
+              guard let self else { return }
+              apiClient.fetchUser(id: id)
+                  .sink { self.user = $0 }   // ❌ inner subscription has no owner
+                  .store(in: &???)           // ❌ can't store here — leaks
+          }
+          .store(in: &cancellables)
+    fix_example: |
+      // ✅ switchToLatest cancels previous request when userId changes
+      $userId
+          .compactMap { $0 }
+          .map { [weak self] id -> AnyPublisher<User, Error> in
+              guard let self else { return Empty().eraseToAnyPublisher() }
+              return self.apiClient.fetchUser(id: id)
+          }
+          .switchToLatest()
+          .receive(on: RunLoop.main)
+          .sink(
+              receiveCompletion: { _ in },
+              receiveValue: { [weak self] user in self?.user = user }
+          )
+          .store(in: &cancellables)
+
+  COMBINE-016:
+    description: ".eraseToAnyPublisher()" used at public API boundaries
+    severity: LOW
+    category: operators
+    rationale: >
+      Exposing concrete publisher types (Publishers.Map<...>) in public/internal
+      interfaces leaks implementation details and breaks callers when the
+      implementation changes. Erase to AnyPublisher at boundaries.
+    bad_example: |
+      // ❌ Concrete type leaks implementation
+      func fetchUsers() -> Publishers.Map<URLSession.DataTaskPublisher, [User]> { ... }
+    fix_example: |
+      // ✅ Opaque AnyPublisher at the interface
+      func fetchUsers() -> AnyPublisher<[User], Error> {
+          urlSession.dataTaskPublisher(for: url)
+              .map { try decode($0.data) }
+              .eraseToAnyPublisher()
+      }
+
+# ============================================================
+# TESTABILITY
+# ============================================================
+
+  COMBINE-017:
+    description: Combine pipelines tested with XCTestExpectation or async/await
+    severity: HIGH
+    category: testability
+    rationale: >
+      Combine pipelines are asynchronous. Tests that don't wait for the pipeline
+      to complete assert on initial state, not the state after the pipeline runs,
+      producing false-passing tests.
+    bad_example: |
+      func testSearch() {
+          viewModel.search("swift")
+          XCTAssertEqual(viewModel.results.count, 5)  // ❌ asserts before pipeline completes
+      }
+    fix_example: |
+      // Option 1: XCTestExpectation
+      func testSearch() {
+          let expectation = expectation(description: "search completes")
+          var received: [SearchResult] = []
+
+          viewModel.$results
+              .dropFirst()
+              .sink { results in
+                  received = results
+                  expectation.fulfill()
+              }
+              .store(in: &cancellables)
+
+          viewModel.search("swift")
+          waitForExpectations(timeout: 1)
+          XCTAssertEqual(received.count, 5)
+      }
+
+      // Option 2: async/await with .values
+      func testSearch() async {
+          viewModel.search("swift")
+          var results: [[SearchResult]] = []
+          for await value in viewModel.$results.values.prefix(2) {
+              results.append(value)
+          }
+          XCTAssertEqual(results.last?.count, 5)
+      }
+
+  COMBINE-018:
+    description: Schedulers injected as dependencies for testable timing control
+    severity: MEDIUM
+    category: testability
+    rationale: >
+      Hard-coding RunLoop.main or DispatchQueue.main makes it impossible to
+      control timing in tests. Inject the scheduler as a dependency so tests
+      can use ImmediateScheduler or TestScheduler.
+    bad_example: |
+      class SearchViewModel {
+          init() {
+              $query
+                  .debounce(for: 0.3, scheduler: RunLoop.main)  // ❌ hard-coded — tests must wait 300ms
+                  .sink { ... }
+          }
+      }
+    fix_example: |
+      class SearchViewModel<S: Scheduler> {
+          init(scheduler: S = RunLoop.main) {
+              $query
+                  .debounce(for: 0.3, scheduler: scheduler)  // ✅ injectable
+                  .sink { ... }
+          }
+      }
+
+      // In tests:
+      let vm = SearchViewModel(scheduler: ImmediateScheduler.shared)
+      // OR with CombineSchedulers:
+      let testScheduler = DispatchQueue.test
+      let vm = SearchViewModel(scheduler: testScheduler)
+      testScheduler.advance(by: 0.3)
+
+# ============================================================
+# PERFORMANCE
+# ============================================================
+
+  COMBINE-019:
+    description: ".share()" used when multiple subscribers tap the same upstream publisher
+    severity: MEDIUM
+    category: performance
+    rationale: >
+      Without .share(), each subscriber creates an independent subscription to
+      the upstream, triggering the work (network request, computation) N times.
+      .share() multicasts to all subscribers from a single upstream subscription.
+    bad_example: |
+      let userPublisher = apiClient.fetchCurrentUser()   // no share
+
+      // Both subscriptions trigger separate network requests
+      userPublisher.sink { self.displayName = $0.name }.store(in: &cancellables)
+      userPublisher.sink { self.avatar = $0.avatarURL }.store(in: &cancellables)
+    fix_example: |
+      let userPublisher = apiClient.fetchCurrentUser()
+          .share()   // ✅ single network request, multicast to both subscribers
+
+      userPublisher.sink { self.displayName = $0.name }.store(in: &cancellables)
+      userPublisher.sink { self.avatar = $0.avatarURL }.store(in: &cancellables)
+
+  COMBINE-020:
+    description: Long-running publishers explicitly cancelled when no longer needed
+    severity: MEDIUM
+    category: performance
+    rationale: >
+      Timers, WebSocket publishers, and location publishers run indefinitely.
+      When the associated feature is dismissed or the user signs out, these
+      must be explicitly cancelled to stop background work.
+    fix_example: |
+      // Explicit cancel on sign out
+      func signOut() {
+          socketCancellable?.cancel()
+          socketCancellable = nil
+      }
+
+      // Or scope via a feature-specific Set that's cleared on deactivation
+      func deactivate() {
+          featureCancellables.removeAll()
+      }
+
+# ============================================================
+# BINDING & ASSIGN
+# ============================================================
+
+  COMBINE-021:
+    description: ".assign(to:on:)" avoided — use ".assign(to: &self.$property)" to prevent retain cycle
+    severity: CRITICAL
+    category: binding_and_assign
+    rationale: >
+      `.assign(to:on:)` stores a strong reference to `self` internally.
+      Because the cancellable is also stored on `self` (via cancellables Set),
+      this creates a retain cycle: self → cancellables → subscription → self.
+      The SwiftUI-aware variant `.assign(to: &self.$publishedProperty)` manages
+      the subscription lifetime through the @Published property and avoids the cycle.
+    applies_to: [ObservableObject classes with @Published properties]
+    bad_example: |
+      class UserViewModel: ObservableObject {
+          @Published var displayName: String = ""
+          private var cancellables = Set<AnyCancellable>()
+
+          init() {
+              userService.namePublisher
+                  .assign(to: \.displayName, on: self)   // ❌ strong retain cycle
+                  .store(in: &cancellables)
+          }
+      }
+    fix_example: |
+      class UserViewModel: ObservableObject {
+          @Published var displayName: String = ""
+          // No cancellables needed for this subscription
+
+          init() {
+              userService.namePublisher
+                  .assign(to: &$displayName)   // ✅ lifecycle tied to @Published; no cycle
+          }
+      }
+    exception: >
+      Use `.assign(to:on:)` only when targeting a property on a *different* object
+      (not self), where the retain cycle cannot form.
+
+  COMBINE-022:
+    description: ".assign(to: &$property)" used only with @Published — not plain properties
+    severity: HIGH
+    category: binding_and_assign
+    rationale: >
+      The `assign(to: inout Published<T>.Publisher)` overload only compiles
+      when the target is a `@Published` property. Using it with a plain stored
+      property or a non-ObservableObject class will fail to compile or silently
+      create a new publisher that nothing observes.
+    guidance: >
+      If the target property is not @Published, use `.sink { [weak self] value in
+      self?.property = value }` with a stored AnyCancellable instead.
+    bad_example: |
+      class ProfileViewModel {
+          var name: String = ""   // ❌ NOT @Published
+
+          init() {
+              namePublisher.assign(to: &$name)   // ❌ won't compile or won't observe
+          }
+      }
+    fix_example: |
+      class ProfileViewModel: ObservableObject {
+          @Published var name: String = ""   // ✅ @Published required
+
+          init() {
+              namePublisher.assign(to: &$name)
+          }
+      }
+
+# ============================================================
+# OPERATOR SEMANTICS
+# ============================================================
+
+  COMBINE-023:
+    description: ".zip" vs ".combineLatest" chosen based on pairing semantics
+    severity: HIGH
+    category: operator_semantics
+    rationale: >
+      These operators are frequently confused but behave very differently:
+      - `.combineLatest` emits whenever *either* upstream emits a new value,
+        pairing it with the latest value from the other. Can emit many times.
+      - `.zip` waits for *both* upstreams to emit, then pairs them 1-to-1
+        in order. Buffers values; only emits when both sides have a pending value.
+      Using the wrong one causes either missed pairings or unexpected extra emissions.
+    guidance: |
+      combineLatest → "give me the latest combination whenever anything changes"
+        Use for: form validation (any field change triggers re-check),
+                 UI state combining two live streams.
+
+      zip → "pair values one-to-one in order, only when both are ready"
+        Use for: uploading two files and combining their results,
+                 step-by-step wizards where each step produces exactly one value.
+    bad_example: |
+      // ❌ zip for form validation — only validates on the Nth submission of each field
+      Publishers.Zip($email, $password)
+          .map { isValid($0, $1) }
+          .assign(to: &$isFormValid)
+
+      // ❌ combineLatest for pairing upload results — emits intermediate combinations
+      Publishers.CombineLatest(upload1Publisher, upload2Publisher)
+          .sink { result1, result2 in combine(result1, result2) }
+    fix_example: |
+      // ✅ combineLatest for form validation — re-validates on any field change
+      Publishers.CombineLatest($email, $password)
+          .map { isValid($0, $1) }
+          .assign(to: &$isFormValid)
+
+      // ✅ zip for pairing exactly one result from each upload
+      Publishers.Zip(upload1Publisher, upload2Publisher)
+          .sink { result1, result2 in combine(result1, result2) }
+          .store(in: &cancellables)
+
+  COMBINE-024:
+    description: ".throttle" vs ".debounce" chosen based on emission timing requirement
+    severity: MEDIUM
+    category: operator_semantics
+    rationale: >
+      Both operators reduce emission frequency but in different ways:
+      - `.debounce(for:)` waits until the stream is *quiet* for the given interval,
+        then emits the last value. Resets the timer on every new emission.
+        Best for: search-as-you-type (emit when user stops typing).
+      - `.throttle(for:latest:)` emits at most once per interval regardless of
+        how many values arrive. Does NOT wait for a quiet period.
+        Best for: scroll events, location updates (sample at a fixed rate).
+    guidance: |
+      debounce  → "emit after the user STOPS doing X for N ms"
+      throttle  → "emit at most once every N ms, regardless of how busy the stream is"
+    bad_example: |
+      // ❌ debounce for scroll events — waits for scrolling to stop,
+      //    so analytics are only sent when the user pauses
+      scrollPublisher
+          .debounce(for: .milliseconds(100), scheduler: RunLoop.main)
+          .sink { trackScroll($0) }
+
+      // ❌ throttle for search — fires mid-word, sending unnecessary requests
+      $searchText
+          .throttle(for: .milliseconds(300), scheduler: RunLoop.main, latest: true)
+          .sink { search($0) }
+    fix_example: |
+      // ✅ throttle for scroll analytics — samples at fixed rate
+      scrollPublisher
+          .throttle(for: .milliseconds(100), scheduler: RunLoop.main, latest: true)
+          .sink { [weak self] in self?.trackScroll($0) }
+          .store(in: &cancellables)
+
+      // ✅ debounce for search — waits until user stops typing
+      $searchText
+          .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
+          .removeDuplicates()
+          .sink { [weak self] in self?.search($0) }
+          .store(in: &cancellables)
+
+  COMBINE-025:
+    description: ".merge" used only for publishers of the same type; combineLatest for different types
+    severity: MEDIUM
+    category: operator_semantics
+    rationale: >
+      `.merge(with:)` requires both publishers to have identical Output and Failure types.
+      It interleaves values from all sources as they arrive — there's no pairing.
+      For combining values from publishers of *different* types, use `.combineLatest`.
+    guidance: |
+      merge        → same type, no pairing needed (e.g. two event streams merged into one)
+      combineLatest → different or same type, latest-value pairing required
+    bad_example: |
+      // ❌ merge on different output types — won't compile
+      let namePublisher: AnyPublisher<String, Never>
+      let agePublisher: AnyPublisher<Int, Never>
+      namePublisher.merge(with: agePublisher)   // ❌ type mismatch
+    fix_example: |
+      // ✅ merge for homogeneous event streams
+      let tapPublisher: AnyPublisher<Void, Never>
+      let swipePublisher: AnyPublisher<Void, Never>
+      tapPublisher.merge(with: swipePublisher)
+          .sink { [weak self] in self?.dismiss() }
+          .store(in: &cancellables)
+
+      // ✅ combineLatest for heterogeneous
+      Publishers.CombineLatest(namePublisher, agePublisher)
+          .map { UserSummary(name: $0, age: $1) }
+          .assign(to: &$userSummary)
+
+# ============================================================
+# RESILIENCE
+# ============================================================
+
+  COMBINE-026:
+    description: ".retry" has a bounded count — never retry infinitely in production
+    severity: HIGH
+    category: resilience
+    rationale: >
+      `.retry(.max)` or `.retry(Int.max)` on a network publisher retries forever.
+      On persistent server errors or no-network conditions this creates an infinite
+      tight loop hammering the server or draining battery. Always set an explicit
+      max and back off between attempts.
+    bad_example: |
+      apiPublisher
+          .retry(.max)    // ❌ infinite retries — hammers server on outage
+          .sink { ... }
+          .store(in: &cancellables)
+
+      apiPublisher
+          .retry(3)       // ❌ no delay between retries — still a burst
+          .sink { ... }
+    fix_example: |
+      // ✅ bounded retries with exponential backoff using CombineExt or manual delay
+      apiPublisher
+          .catch { error -> AnyPublisher<Response, Error> in
+              // Exponential backoff: 1s, 2s, 4s
+              Just(())
+                  .delay(for: .seconds(pow(2.0, Double(retryCount))), scheduler: RunLoop.main)
+                  .flatMap { apiPublisher }
+                  .eraseToAnyPublisher()
+          }
+          // Or with a simple bounded retry + minimum delay:
+          .delay(for: .seconds(1), scheduler: RunLoop.main)
+          .retry(3)
+          .sink { ... }
+          .store(in: &cancellables)
+
+  COMBINE-027:
+    description: ".timeout" used for long-running network or async publishers
+    severity: MEDIUM
+    category: resilience
+    rationale: >
+      A publisher with no timeout can hang indefinitely if the server never
+      responds or a device loses connectivity mid-request. `.timeout` terminates
+      the publisher with a specific error after the given interval, allowing
+      the UI to show a user-facing error instead of spinning forever.
+    bad_example: |
+      apiPublisher
+          .sink(
+              receiveCompletion: { _ in },
+              receiveValue: { [weak self] in self?.result = $0 }
+          )
+          .store(in: &cancellables)
+          // ❌ hangs forever on no-response
+    fix_example: |
+      enum NetworkError: Error { case timedOut }
+
+      apiPublisher
+          .timeout(.seconds(10), scheduler: RunLoop.main, customError: { NetworkError.timedOut })
+          .sink(
+              receiveCompletion: { [weak self] completion in
+                  if case .failure(let error) = completion {
+                      self?.errorMessage = error.localizedDescription
+                  }
+              },
+              receiveValue: { [weak self] in self?.result = $0 }
+          )
+          .store(in: &cancellables)
+
+# ============================================================
+# ASYNC/AWAIT BRIDGE
+# ============================================================
+
+  COMBINE-028:
+    description: "Future executes eagerly — wrap in Deferred for lazy/repeatable execution"
+    severity: HIGH
+    category: async_await_bridge
+    rationale: >
+      `Future` runs its closure *immediately* when created, regardless of whether
+      anyone has subscribed. This means the work (network call, disk I/O) starts
+      before any subscriber exists, and the result is cached — re-subscribing
+      does NOT re-execute the work. Wrap in `Deferred` when the work should only
+      run upon subscription and re-run on each new subscription.
+    bad_example: |
+      // ❌ Network call fires immediately at creation time — before any subscriber
+      let userPublisher = Future<User, Error> { promise in
+          APIClient.shared.fetchUser { result in promise(result) }
+      }
+
+      // Later — no new network request made; cached result replayed
+      userPublisher.sink { ... }.store(in: &cancellables)
+      userPublisher.sink { ... }.store(in: &cancellables)   // same cached result
+    fix_example: |
+      // ✅ Deferred<Future> — work runs only when subscribed, fresh each time
+      let userPublisher = Deferred {
+          Future<User, Error> { promise in
+              APIClient.shared.fetchUser { result in promise(result) }
+          }
+      }
+      // Each .sink() triggers a new network request
+
+  COMBINE-029:
+    description: ".values" used to bridge a Combine publisher into async/await context
+    severity: LOW
+    category: async_await_bridge
+    rationale: >
+      `.values` exposes a Combine publisher as an `AsyncSequence`, enabling
+      `for await` iteration. This is the preferred bridge for consuming Combine
+      publishers inside async functions without mixing Combine and async/await
+      subscription patterns in the same call site.
+    guidance: >
+      Use `.values` when: (1) inside an async function, (2) consuming a stream
+      of values sequentially, (3) wanting Swift concurrency's structured
+      cancellation to propagate to the Combine subscription automatically.
+    fix_example: |
+      // Combine publisher → async sequence via .values
+      func waitForFirstValidUser() async throws -> User {
+          for await user in userPublisher.values {
+              if user.isVerified { return user }
+          }
+          throw UserError.noneFound
+      }
+
+      // With prefix to limit consumption:
+      let firstThreeUpdates = await locationPublisher
+          .values
+          .prefix(3)
+          .reduce(into: []) { $0.append($1) }
+
+  COMBINE-030:
+    description: Prefer async/await for one-shot operations; reserve Combine for multi-value streams
+    severity: SUGGESTION
+    category: async_await_bridge
+    rationale: >
+      Combine adds overhead (publisher/subscriber/scheduler machinery) that is
+      unnecessary for single-value async operations. `async/await` is simpler,
+      more readable, and better supported by Swift concurrency tools.
+      Combine shines for multi-value, time-based, or operator-heavy pipelines.
+    guidance: |
+      Use async/await when:
+        - Exactly one value is expected (network request, database read)
+        - No operators (map, filter, combineLatest) are needed
+        - Error propagation via try/catch is sufficient
+
+      Use Combine when:
+        - Multiple values over time (timers, WebSocket, search-as-you-type)
+        - Chaining multiple operators (debounce + removeDuplicates + flatMap)
+        - Coordinating multiple streams (combineLatest, zip, merge)
+        - Binding directly to @Published properties
+    bad_example: |
+      // ❌ Combine for a simple one-shot fetch — unnecessary complexity
+      func loadProfile() {
+          apiClient.profilePublisher(for: userId)
+              .receive(on: RunLoop.main)
+              .sink(
+                  receiveCompletion: { if case .failure(let e) = $0 { self.error = e } },
+                  receiveValue: { self.profile = $0 }
+              )
+              .store(in: &cancellables)
+      }
+    fix_example: |
+      // ✅ async/await for one-shot fetch — simpler, structured cancellation
+      @MainActor
+      func loadProfile() async {
+          do {
+              profile = try await apiClient.fetchProfile(for: userId)
+          } catch {
+              self.error = error
+          }
+      }
+
+# ============================================================
+# ANTI-PATTERNS
+# ============================================================
+
+  COMBINE-031:
+    description: "sink(receiveCompletion:receiveValue:)" used for publishers that can fail
+    severity: HIGH
+    category: anti_patterns
+    rationale: >
+      The single-argument `sink { value in }` overload is only available on
+      publishers with `Failure == Never`. For failable publishers, using this
+      overload requires prior `.catch` or `.replaceError`, which may silently
+      discard errors. The two-argument overload makes error handling explicit.
+    bad_example: |
+      apiPublisher   // Failure == Error
+          .replaceError(with: [])    // ❌ errors silently produce empty array
+          .sink { self.items = $0 }
+          .store(in: &cancellables)
+    fix_example: |
+      apiPublisher   // Failure == Error
+          .sink(
+              receiveCompletion: { [weak self] completion in
+                  if case .failure(let error) = completion {
+                      logger.error("Fetch failed: \(error)")
+                      self?.errorMessage = "Could not load items."
+                  }
+              },
+              receiveValue: { [weak self] items in
+                  self?.items = items
+              }
+          )
+          .store(in: &cancellables)
+
+  COMBINE-032:
+    description: "@Published fires on willSet — do not read self's property in the same pipeline"
+    severity: MEDIUM
+    category: anti_patterns
+    rationale: >
+      `@Published` publishes a new value *before* the property is actually set
+      (it fires on `willSet`). Reading `self.property` inside a downstream
+      `.sink` or `.map` during the same publication cycle reads the old value,
+      creating subtle state bugs that are hard to reproduce.
+    bad_example: |
+      class CartViewModel: ObservableObject {
+          @Published var items: [Item] = []
+
+          init() {
+              $items
+                  .sink { [weak self] newItems in
+                      // ❌ self.items still holds the OLD value here (willSet semantics)
+                      print("Previous count: \(self?.items.count ?? 0)")
+                      print("New count: \(newItems.count)")
+                  }
+                  .store(in: &cancellables)
+          }
+      }
+    fix_example: |
+      $items
+          .sink { [weak self] newItems in
+              // ✅ Use the closure parameter — it IS the new value
+              print("New count: \(newItems.count)")
+              self?.updateBadge(count: newItems.count)
+          }
+          .store(in: &cancellables)
+
+  COMBINE-033:
+    description: Combine pipelines not created inside SwiftUI body or view modifiers
+    severity: HIGH
+    category: anti_patterns
+    rationale: >
+      SwiftUI may call `body` many times per second. Any Combine subscription
+      created inside `body` is recreated on every render — potentially hundreds
+      of times — each creating a new subscription and leaking the previous one
+      (since there's no stable place to store the cancellable).
+    applies_to: [SwiftUI View body, computed properties called from body]
+    bad_example: |
+      var body: some View {
+          // ❌ New subscription created on every render — leaks the previous one
+          let _ = viewModel.$items
+              .sink { print("items: \($0.count)") }
+
+          List(viewModel.items) { item in ItemRow(item: item) }
+      }
+    fix_example: |
+      // ✅ Subscriptions belong in the ViewModel or in .onAppear/.task
+      // In ViewModel init:
+      init() {
+          $items
+              .sink { print("items: \($0.count)") }
+              .store(in: &cancellables)
+      }
+
+      // In View, use .task or .onReceive for View-owned reactions:
+      var body: some View {
+          List(viewModel.items) { item in ItemRow(item: item) }
+              .onReceive(viewModel.$items) { items in
+                  // ✅ onReceive manages the subscription lifecycle for you
+                  badgeCount = items.count
+              }
+      }

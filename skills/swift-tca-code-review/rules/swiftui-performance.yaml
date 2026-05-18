@@ -1,0 +1,144 @@
+---
+# SwiftUI Performance Rules
+# Used by: swift-tca-code-review
+# Note: MVVM has its own extended version (swiftui-bindings.yaml)
+
+rule_set:
+  id: swiftui_performance
+  name: SwiftUI Performance
+  description: SwiftUI rendering performance and correctness rules for TCA-backed views
+  enabled: always
+  reference: https://developer.apple.com/documentation/swiftui/performance
+
+checks:
+
+  PERF-001:
+    description: body contains no side effects
+    severity: HIGH
+    rationale: >
+      SwiftUI may call `body` many times per second during animations and
+      layout passes. Side effects in `body` (network calls, logging, mutations)
+      execute unpredictably and cause performance degradation.
+    bad_example: |
+      var body: some View {
+          print("Rendering HomeView")       // ❌ logs on every render
+          Analytics.shared.track("render")  // ❌ spams analytics
+          Text(viewStore.title)
+      }
+    fix_example: |
+      var body: some View {
+          Text(viewStore.title)
+              .onAppear { viewStore.send(.appeared) }  // ✅ side effect in action
+      }
+
+  PERF-002:
+    description: Heavy computations moved to ViewModel or cached — not in body
+    severity: MEDIUM
+    rationale: >
+      Expensive operations (sorting, filtering, formatting) in `body` run on
+      every render. They should be pre-computed in the Reducer/State or
+      cached with `let` constants outside the body.
+    bad_example: |
+      var body: some View {
+          // ❌ sorted on every render
+          List(viewStore.items.sorted { $0.name < $1.name }) { item in
+              ItemRow(item: item)
+          }
+      }
+    fix_example: |
+      // ✅ Sorted in Reducer when items change
+      case .itemsLoaded(let items):
+          state.sortedItems = items.sorted { $0.name < $1.name }
+          return .none
+
+  PERF-003:
+    description: ForEach/List use stable id keypaths — not .self on value types
+    severity: HIGH
+    rationale: >
+      Using `.self` as the id on a value type means SwiftUI re-renders the
+      entire list whenever any property changes, even unrelated ones.
+      A stable `\.id` keypath allows surgical updates.
+    bad_example: |
+      ForEach(items, id: \.self) { item in  // ❌ .self on Equatable struct
+          ItemRow(item: item)
+      }
+    fix_example: |
+      ForEach(items, id: \.id) { item in   // ✅ stable UUID/String id
+          ItemRow(item: item)
+      }
+
+  PERF-004:
+    description: "@StateObject vs @ObservedObject ownership is correct"
+    severity: HIGH
+    rationale: >
+      `@StateObject` creates and owns the object's lifecycle — use it in the
+      root View that creates the ViewModel. `@ObservedObject` observes an
+      externally owned object. Swapping them causes either premature deallocation
+      or duplicate instances.
+    note: >
+      In TCA, ViewStore is typically accessed via `WithViewStore` or `@ObservedObject`.
+      This rule applies when TCA is mixed with ObservableObject ViewModels.
+    bad_example: |
+      struct ParentView: View {
+          @ObservedObject var vm = ProfileViewModel()  // ❌ recreated on every parent render
+      }
+    fix_example: |
+      struct ParentView: View {
+          @StateObject var vm = ProfileViewModel()     // ✅ owned by this view
+      }
+      struct ChildView: View {
+          @ObservedObject var vm: ProfileViewModel     // ✅ passed from parent
+      }
+
+  PERF-005:
+    description: AnyView not used in tight loops or frequently-rendered subtrees
+    severity: MEDIUM
+    rationale: >
+      `AnyView` erases the type identity, preventing SwiftUI's diff algorithm
+      from doing incremental updates. The entire subtree re-renders on each pass.
+    bad_example: |
+      ForEach(items) { item in
+          AnyView(item.isPremium ? PremiumRow(item: item) : StandardRow(item: item))
+      }
+    fix_example: |
+      ForEach(items) { item in
+          if item.isPremium {
+              PremiumRow(item: item)
+          } else {
+              StandardRow(item: item)
+          }
+      }
+      // Or use @ViewBuilder for the conditional
+
+  PERF-006:
+    description: ".task{} preferred over .onAppear for async work"
+    severity: LOW
+    rationale: >
+      `.task {}` automatically cancels the async work when the view disappears.
+      `.onAppear` with a detached Task leaks the Task and must be manually cancelled.
+    bad_example: |
+      .onAppear {
+          Task { await viewStore.send(.load).finish() }  // ❌ not auto-cancelled
+      }
+    fix_example: |
+      .task {
+          await viewStore.send(.load).finish()            // ✅ auto-cancelled on disappear
+      }
+
+  PERF-007:
+    description: NavigationStack used — not deprecated NavigationView
+    severity: MEDIUM
+    rationale: >
+      `NavigationView` is deprecated in iOS 16+. `NavigationStack` provides
+      programmatic navigation path, deep-link support, and fixes known layout bugs.
+    bad_example: |
+      NavigationView {
+          HomeView()
+      }
+    fix_example: |
+      NavigationStack(path: $viewStore.navigationPath) {
+          HomeView()
+              .navigationDestination(for: Route.self) { route in
+                  RouteView(route: route)
+              }
+      }

@@ -1,0 +1,547 @@
+---
+# Accessibility Rules
+# Shared across all architecture skills (TCA, MVVM, VIPER)
+# Standard: WCAG 2.1 AA  |  Additional: WCAG 2.2, ADA, EN 301 549
+# Applies to: all iOS SwiftUI and UIKit interfaces
+
+rule_set:
+  id: accessibility
+  name: Accessibility
+  description: WCAG 2.1 AA compliance for iOS SwiftUI and UIKit interfaces
+  enabled: always
+  standard: WCAG 2.1 AA
+  reference: https://www.w3.org/WAI/WCAG21/quickref/
+
+# ============================================================
+# CATEGORY 1 — Core Labels, Roles & Structure
+# ============================================================
+
+checks:
+
+  A11Y-001:
+    description: All interactive elements have .accessibilityLabel
+    severity: HIGH
+    rationale: >
+      VoiceOver reads the accessibility label aloud. Without it, blind users
+      hear only "button" or "image" with no context.
+    applies_to: [Button, Toggle, Slider, Stepper, custom tap targets]
+    bad_example: |
+      Button(action: send) {
+          Image(systemName: "paperplane.fill")
+      }
+    fix_example: |
+      Button(action: send) {
+          Image(systemName: "paperplane.fill")
+      }
+      .accessibilityLabel("Send message")
+    uikit_equivalent: >
+      button.accessibilityLabel = "Send message"
+
+  A11Y-002:
+    description: Custom controls set .accessibilityRole
+    severity: HIGH
+    rationale: >
+      Custom gesture recognizers or shapes that act as controls are invisible
+      to VoiceOver without an explicit role declaration.
+    applies_to: [custom tap views, gesture-driven controls, custom toggles]
+    bad_example: |
+      RoundedRectangle(cornerRadius: 8)
+          .onTapGesture { toggle() }
+    fix_example: |
+      RoundedRectangle(cornerRadius: 8)
+          .onTapGesture { toggle() }
+          .accessibilityRole(.button)
+          .accessibilityLabel("Toggle filter")
+
+  A11Y-003:
+    description: Decorative images have .accessibilityHidden(true)
+    severity: MEDIUM
+    rationale: >
+      VoiceOver reads all images unless explicitly hidden. Decorative images
+      that carry no information create noise in the reading order.
+    applies_to: [Image views used purely for decoration]
+    bad_example: |
+      Image("background-pattern")
+    fix_example: |
+      Image("background-pattern")
+          .accessibilityHidden(true)
+
+  A11Y-004:
+    description: Color is not the sole differentiator for state
+    severity: HIGH
+    rationale: >
+      ~8% of men have color vision deficiency. Using color alone to indicate
+      error, selection, or status fails WCAG 1.4.1 (Use of Color).
+    applies_to: [error states, selected/unselected, status indicators]
+    bad_example: |
+      TextField("Email", text: $email)
+          .border(isValid ? Color.green : Color.red)
+    fix_example: |
+      TextField("Email", text: $email)
+          .border(isValid ? Color.green : Color.red)
+          .overlay(alignment: .trailing) {
+              Image(systemName: isValid ? "checkmark" : "xmark")
+          }
+          .accessibilityValue(isValid ? "Valid" : "Invalid")
+
+  A11Y-005:
+    description: Dynamic Type respected — no fixed non-scalable font sizes
+    severity: HIGH
+    rationale: >
+      Users with low vision increase text size system-wide. Fixed pixel sizes
+      override this and fail WCAG 1.4.4 (Resize text).
+    bad_example: |
+      Text("Title")
+          .font(.system(size: 17))
+    fix_example: |
+      Text("Title")
+          .font(.headline)
+      // Or cap range safely:
+      Text("Title")
+          .font(.system(size: 17, weight: .semibold))
+          .dynamicTypeSize(.small ... .accessibility3)
+
+  A11Y-006:
+    description: VoiceOver reading order set with .accessibilitySortPriority where non-obvious
+    severity: LOW
+    rationale: >
+      SwiftUI reads views top-to-bottom, left-to-right by default.
+      Custom layouts (ZStack, overlay, Grid) can produce wrong reading order.
+    applies_to: [ZStack, overlay, custom Grid, absolute positioned views]
+    fix_example: |
+      VStack {
+          Text("Price: $9.99")
+              .accessibilitySortPriority(2)
+          Text("Product name")
+              .accessibilitySortPriority(1)
+      }
+
+# ============================================================
+# CATEGORY 2 — Data Display & Masking
+# ============================================================
+
+  A11Y-007:
+    description: Masked values have a human-readable accessibilityLabel
+    severity: HIGH
+    rationale: >
+      VoiceOver reads "****" as "asterisk asterisk asterisk asterisk" — meaningless
+      noise. The masked display is for visual security; the label should communicate
+      what the user needs to know.
+    applies_to: [masked credential fields, partially hidden identifiers, redacted text]
+    wcag: "1.3.1 Info and Relationships"
+    bad_example: |
+      Text("**** **** **** 4321")   // VO reads: "asterisk asterisk asterisk..."
+    fix_example: |
+      Text("**** **** **** 4321")
+          .accessibilityLabel("Card ending in 4 3 2 1")
+
+  A11Y-008:
+    description: Currency and numeric values formatted for natural speech
+    severity: HIGH
+    rationale: >
+      "$1,234.56" is read by VoiceOver as "dollar sign 1 comma 234 period 56".
+      Use .accessibilityLabel with a spoken string so it reads naturally.
+    applies_to: [price labels, amount displays, confirmation screens]
+    wcag: "1.3.1 Info and Relationships"
+    bad_example: |
+      Text("$1,234.56")    // VO: "dollar sign 1 comma 2 3 4 period 5 6"
+    fix_example: |
+      Text("$1,234.56")
+          .accessibilityLabel(
+              NumberFormatter.spokenCurrency(amount: 1234.56, locale: .current)
+              // produces "1,234 dollars and 56 cents"
+          )
+    note: >
+      Create a shared NumberFormatter extension that produces a localized spoken
+      string. Reuse across the app.
+
+  A11Y-009:
+    description: Sensitive data not announced without explicit user intent
+    severity: HIGH
+    rationale: >
+      Sensitive values revealed by VoiceOver in ambient environments (offices,
+      public transport) are a privacy and security risk. Require explicit user
+      action to reveal; default label confirms only what is necessary.
+    applies_to: [masked identifiers, credential detail screens, reveal-on-tap patterns]
+    wcag: "OWASP M2 — Insecure Data Storage"
+    fix_example: |
+      Text(isRevealed ? fullValue : "Ending in 1234")
+          .accessibilityLabel(
+              isRevealed ? "Full number \(spokenDigits(fullValue))"
+                         : "Ending in 1 2 3 4. Double-tap to reveal."
+          )
+
+  A11Y-010:
+    description: Status badges have accessibilityValue matching visual state
+    severity: HIGH
+    rationale: >
+      "Pending", "Active", "Failed" badges are often rendered as colored chips.
+      Color alone fails WCAG 1.4.1 and small badge text may be missed
+      without combining label + value.
+    applies_to: [status chips, state indicator pills, badge views]
+    bad_example: |
+      Text("Pending")
+          .padding(4)
+          .background(Color.orange)
+          .clipShape(Capsule())
+    fix_example: |
+      Text("Pending")
+          .padding(4)
+          .background(Color.orange)
+          .clipShape(Capsule())
+          .accessibilityElement()
+          .accessibilityLabel("Status")
+          .accessibilityValue("Pending")
+
+  A11Y-011:
+    description: Charts and graphs provide a text data alternative
+    severity: HIGH
+    rationale: >
+      Charts are purely visual. Blind users and users with cognitive disabilities
+      must be able to access the underlying data as text (table, list, or summary).
+    applies_to: [Swift Charts views, custom chart views, data visualizations]
+    wcag: "1.1.1 Non-text Content, 1.3.1 Info and Relationships"
+    fix_example: |
+      Chart(data) { ... }
+          .accessibilityLabel("Monthly data chart")
+          .accessibilityChartDescriptor(DataChartDescriptor(data: data))
+          // OR provide a toggle to show a data table alternative
+      // Swift Charts (iOS 16+): AXChartDescriptorRepresentable gives
+      // audio graph and spoken summary automatically.
+    note: >
+      iOS 16+ Swift Charts generates audio graphs automatically when
+      AXChartDescriptorRepresentable is implemented. Require this for all chart views.
+
+  A11Y-012:
+    description: Multi-element list rows grouped as single accessible element
+    severity: MEDIUM
+    rationale: >
+      A row with title, metadata, and status forces VoiceOver to swipe through
+      each element individually — extremely tedious for long lists. Combine into
+      one element with a descriptive composite label.
+    applies_to: [List rows, ForEach data cells with multiple sub-elements]
+    wcag: "1.3.1 Info and Relationships"
+    bad_example: |
+      HStack {
+          Text(item.title)
+          Spacer()
+          Text(item.formattedValue)
+          Text(item.date)
+      }
+    fix_example: |
+      HStack {
+          Text(item.title)
+          Spacer()
+          Text(item.formattedValue)
+          Text(item.date)
+      }
+      .accessibilityElement(children: .combine)
+      .accessibilityLabel("\(item.title), \(item.spokenValue), \(item.relativeDate)")
+
+# ============================================================
+# CATEGORY 3 — Input, Authentication & Forms
+# ============================================================
+
+  A11Y-013:
+    description: Custom numeric keypads are VoiceOver-accessible and do not announce entered digits
+    severity: CRITICAL
+    rationale: >
+      Custom numeric keypads that bypass UITextField/SecureField are completely
+      invisible to VoiceOver unless each key has an accessibilityLabel. Crucially,
+      the current entry count — NOT the digit value — should be announced for security.
+    applies_to: [PIN entry, OTP input, passcode screens, custom numeric pads]
+    wcag: "4.1.2 Name, Role, Value"
+    bad_example: |
+      // Custom RoundedRectangle buttons with Text("1")…Text("9") — no a11y attributes
+    fix_example: |
+      Button(action: { appendDigit("7") }) {
+          Text("7")
+      }
+      .accessibilityLabel("7")
+      .accessibilityHint("Digit 7")
+
+      // After appending, announce count only — never the digit value:
+      // UIAccessibility.post(notification: .announcement,
+      //     argument: "\(enteredCount) digits entered")
+
+  A11Y-014:
+    description: Secure input fields do not announce entered characters
+    severity: CRITICAL
+    rationale: >
+      VoiceOver by default announces each character typed into a text field.
+      For password and PIN fields this is a security risk in public spaces.
+      SecureField suppresses this; custom inputs must also suppress it.
+    applies_to: [SecureField, custom PIN inputs, password fields]
+    fix_example: |
+      // System SecureField handles this correctly.
+      SecureField("Password", text: $password)
+          .accessibilityLabel("Enter your password")
+
+      // Custom field: set textContentType(.password) on the underlying
+      // UITextField in UIViewRepresentable to enable OS-level suppression.
+
+  A11Y-015:
+    description: Inline validation errors programmatically announced to VoiceOver
+    severity: HIGH
+    rationale: >
+      Error messages appearing below a field are invisible to VoiceOver unless
+      focus is moved there or an announcement is posted. Complex validated fields
+      must communicate failure immediately and clearly.
+    applies_to: [validated text inputs, format-constrained fields, required fields]
+    wcag: "3.3.1 Error Identification"
+    bad_example: |
+      if !isValid {
+          Text("Invalid format")
+              .foregroundColor(.red)
+      }
+    fix_example: |
+      if !isValid {
+          Text("Invalid format")
+              .foregroundColor(.red)
+              .accessibilityLabel("Error: Invalid format")
+      }
+      .onChange(of: isValid) { valid in
+          if !valid {
+              UIAccessibility.post(notification: .announcement,
+                  argument: "Error: Invalid format")
+          }
+      }
+
+  A11Y-016:
+    description: Minimum touch target 44×44 pt on primary and destructive action buttons
+    severity: HIGH
+    rationale: >
+      WCAG 2.5.5 recommends 44×44 pt minimum. Too-small tap targets cause accidental
+      activations for users with motor impairments — especially on high-consequence
+      confirmation buttons.
+    applies_to: [primary CTA buttons, destructive action buttons, confirm/submit controls]
+    wcag: "2.5.5 Target Size"
+    bad_example: |
+      Button("Submit") { confirm() }
+          .font(.caption)     // renders ~22 pt tall
+    fix_example: |
+      Button("Submit") { confirm() }
+          .frame(minWidth: 44, minHeight: 44)
+          .contentShape(Rectangle())
+
+  A11Y-017:
+    description: Biometric authentication result announced via UIAccessibility
+    severity: MEDIUM
+    rationale: >
+      Face ID / Touch ID dialogs are system-level and accessible, but the app's
+      response (success → navigate, failure → show retry) must also announce
+      state changes for users who cannot see the UI update.
+    applies_to: [LAContext.evaluatePolicy, biometric login flows]
+    fix_example: |
+      context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
+                             localizedReason: reason) { success, error in
+          DispatchQueue.main.async {
+              if success {
+                  UIAccessibility.post(notification: .announcement,
+                      argument: "Authentication successful")
+                  navigateToDashboard()
+              } else {
+                  UIAccessibility.post(notification: .announcement,
+                      argument: "Authentication failed. \(error?.localizedDescription ?? "")")
+              }
+          }
+      }
+
+# ============================================================
+# CATEGORY 4 — Navigation & Focus Management
+# ============================================================
+
+  A11Y-018:
+    description: Focus moves to result state after async actions complete
+    severity: HIGH
+    rationale: >
+      After a long-running action completes (form submission, async operation),
+      VoiceOver focus remains on the trigger button — now disabled or gone.
+      Explicitly move focus to the result or success state.
+    applies_to: [form submission, async action completion, multi-step flows]
+    wcag: "3.2.2 On Input"
+    fix_example: |
+      .onChange(of: actionState) { state in
+          if state == .success {
+              UIAccessibility.post(notification: .screenChanged,
+                  argument: "Action completed successfully.")
+          }
+      }
+
+  A11Y-019:
+    description: Modal confirmation sheets trap VoiceOver focus within the sheet
+    severity: HIGH
+    rationale: >
+      If VoiceOver can swipe outside a confirmation sheet to interact with
+      background content, a user may activate a destructive action without reviewing
+      it. Custom overlays must trap focus inside until dismissed.
+    applies_to: [confirmation sheets, destructive action dialogs, custom modal overlays]
+    wcag: "2.1.2 No Keyboard Trap (must be escapable)"
+    fix_example: |
+      // System .sheet() and .alert() trap focus automatically.
+      // Custom overlay/ZStack must add:
+      overlayView
+          .accessibilityAddTraits(.isModal)
+
+  A11Y-020:
+    description: Swipe-only gestures have an accessible button alternative
+    severity: HIGH
+    rationale: >
+      Swipe-to-delete, swipe-to-approve, and pull-to-refresh are inaccessible
+      to Switch Control and users with motor impairments. WCAG 2.5.1 requires all
+      pointer-gesture functionality to also be available via single-point interaction.
+    applies_to: [swipe-to-delete rows, swipe actions, pull-to-refresh]
+    wcag: "2.5.1 Pointer Gestures"
+    fix_example: |
+      List {
+          ForEach(items) { item in
+              ItemRow(item)
+                  .swipeActions {
+                      Button("Delete", role: .destructive) { delete(item) }
+                  }
+                  // swipeActions are automatically exposed as accessibility actions
+          }
+      }
+      // .refreshable {} exposes "Pull to refresh" as an accessibility action automatically.
+
+  A11Y-021:
+    description: Loading and processing states announced to VoiceOver
+    severity: HIGH
+    rationale: >
+      Spinners and progress indicators are purely visual. Blind users cannot tell
+      whether the app is working or frozen. Post announcements when loading
+      begins and ends.
+    applies_to: [async operation indicators, progress views, skeleton screens]
+    wcag: "4.1.3 Status Messages"
+    bad_example: |
+      if isLoading { ProgressView() }
+    fix_example: |
+      if isLoading {
+          ProgressView("Loading…")
+              .accessibilityLabel("Loading, please wait")
+      }
+      .onChange(of: isLoading) { loading in
+          if loading {
+              UIAccessibility.post(notification: .announcement,
+                  argument: "Loading, please wait")
+          }
+      }
+
+# ============================================================
+# CATEGORY 5 — Session, Time & Temporal
+# ============================================================
+
+  A11Y-022:
+    description: Session timeout warned with sufficient notice and an extension option
+    severity: HIGH
+    rationale: >
+      Apps that auto-expire sessions must warn users before logout. Users of
+      assistive technology interact more slowly. Silent auto-logout is a WCAG
+      failure — users must be warned and able to extend.
+    applies_to: [session management, inactivity timers, auto-logout flows]
+    wcag: "2.2.1 Timing Adjustable"
+    fix_example: |
+      // At 60 seconds before timeout:
+      UIAccessibility.post(notification: .announcement,
+          argument: "Session expires in 60 seconds. Double-tap to extend session.")
+      // Show a visible dialog with an "Extend session" button.
+      // Do NOT auto-dismiss the warning — user must explicitly dismiss.
+
+  A11Y-023:
+    description: Time-based countdown timers announced to VoiceOver at critical thresholds
+    severity: MEDIUM
+    rationale: >
+      Countdown timers (OTP expiry, limited-time actions) are visual-only. Users
+      relying on VoiceOver need to know when time is running short.
+    applies_to: [OTP timers, expiry countdowns, time-limited actions]
+    wcag: "2.2.1 Timing Adjustable"
+    fix_example: |
+      // Announce at thresholds — not every second (too noisy)
+      .onChange(of: secondsRemaining) { seconds in
+          if seconds == 10 {
+              UIAccessibility.post(notification: .announcement,
+                  argument: "Expires in 10 seconds")
+          }
+      }
+      Text("\(secondsRemaining)s")
+          .accessibilityLabel("Expires in \(secondsRemaining) seconds")
+
+  A11Y-024:
+    description: Dates use relative, human-readable labels for VoiceOver
+    severity: MEDIUM
+    rationale: >
+      Raw timestamps like "2024-01-15T14:32:00Z" or "15/01/24" are difficult to
+      parse aurally. Use RelativeDateTimeFormatter for a spoken label such as
+      "Yesterday at 2:32 PM".
+    applies_to: [date labels, timestamps, relative time displays]
+    fix_example: |
+      let formatter = RelativeDateTimeFormatter()
+      formatter.unitsStyle = .full
+      let spoken = formatter.localizedString(for: item.date, relativeTo: Date())
+      // "Yesterday", "2 hours ago", "Last Monday"
+
+      Text(item.shortDateDisplay)
+          .accessibilityLabel(spoken)
+
+# ============================================================
+# CATEGORY 6 — Motion, Contrast & Perception
+# ============================================================
+
+  A11Y-025:
+    description: Reduce Motion respected — animated transitions and counters suppressed
+    severity: MEDIUM
+    rationale: >
+      Animated number counters and screen transitions can trigger vestibular
+      disorders. Honor @Environment(\.accessibilityReduceMotion) for all
+      non-essential animations.
+    applies_to: [number reveal animations, feed transitions, scroll-driven effects]
+    wcag: "2.3.3 Animation from Interactions (AAA — recommended)"
+    fix_example: |
+      @Environment(\.accessibilityReduceMotion) var reduceMotion
+
+      var entryTransition: AnyTransition {
+          reduceMotion ? .opacity : .scale.combined(with: .opacity)
+      }
+
+      Text(formattedValue)
+          .transition(entryTransition)
+          .animation(reduceMotion ? .none : .spring(), value: displayedValue)
+
+  A11Y-026:
+    description: Positive and negative values distinguished beyond color alone
+    severity: HIGH
+    rationale: >
+      Using red for negative and green for positive is invisible to ~8% of men
+      with red-green color blindness. Add a leading "–" / "+" sign and an
+      explicit accessibilityLabel alongside color.
+    applies_to: [signed numeric displays, delta indicators, gain/loss values]
+    wcag: "1.4.1 Use of Color"
+    bad_example: |
+      Text(value.formatted())
+          .foregroundColor(isNegative ? .red : .green)    // color only
+    fix_example: |
+      Text("\(isNegative ? "–" : "+")\(value.formatted())")
+          .foregroundColor(isNegative ? .red : .green)
+          .accessibilityLabel(
+              "\(isNegative ? "Decrease" : "Increase") \(value.spokenString)"
+          )
+
+  A11Y-027:
+    description: Text contrast ratio meets WCAG 4.5:1 — no light grey on white for important data
+    severity: HIGH
+    rationale: >
+      Light grey text on white backgrounds (common in minimal UI) frequently fails
+      the 4.5:1 contrast requirement. Important data rendered at insufficient contrast
+      fails WCAG 1.4.3 and reduces legibility for all users in bright environments.
+    applies_to: [primary data labels, secondary descriptive text, caption fields]
+    wcag: "1.4.3 Contrast (Minimum)"
+    detection: >
+      Flag any Text with explicit .foregroundColor using a custom light grey
+      (e.g. Color(white: 0.6) on white background ≈ 3.5:1 — fails).
+    fix_example: |
+      // Semantic system colors adapt for light/dark and high-contrast mode
+      Text(importantValue)
+          .foregroundStyle(.primary)      // always meets contrast threshold
+
+      // For secondary text: .secondary meets 4.5:1 in system defaults.
+      // Avoid Color(white: 0.5...0.7) on white backgrounds.

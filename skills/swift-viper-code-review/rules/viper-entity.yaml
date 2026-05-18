@@ -1,0 +1,135 @@
+---
+# VIPER Entity Layer Rules
+# Responsibility: Plain data structures representing domain objects
+
+rule_set:
+  id: viper_entity
+  name: VIPER — Entity Layer
+  description: >
+    Rules for the Entity layer in VIPER. Entities are pure data containers —
+    plain Swift structs or classes with properties and Codable conformance.
+    They must contain no business logic, no network code, no persistence,
+    and no references to other VIPER layers.
+  enabled: always
+  layer: Entity
+  naming_patterns: ["*Entity", "*Model", "*DataModel", "*Response", "*Request"]
+
+checks:
+
+  ENT-001:
+    description: Entities are plain structs or classes with no business methods
+    severity: MEDIUM
+    rationale: >
+      Business methods in Entities create implicit coupling between the data
+      model and business rules. If the rule changes, every consumer must update.
+      Entities should be dumb data bags; logic lives in the Interactor.
+    exceptions:
+      - "Simple computed properties that format a stored value (e.g. fullName from first + last)"
+      - "Equatable, Hashable, Codable conformance methods"
+    bad_example: |
+      struct Order: Entity {
+          var price: Double
+          var tax: Double
+
+          // ❌ Business logic in Entity
+          func finalPrice(withDiscount discount: Double) -> Double {
+              return (price + tax) * (1 - discount)
+          }
+
+          // ❌ Side effect in Entity
+          func save() {
+              Firestore.firestore().collection("orders").addDocument(from: self)
+          }
+      }
+    fix_example: |
+      struct Order: Codable, Equatable {
+          let id: String
+          let price: Double
+          let tax: Double
+          let createdAt: Date
+      }
+      // Business logic (discount, tax calculation) lives in OrderInteractor
+
+  ENT-002:
+    description: Entities have no network, Firestore, or persistence logic
+    severity: HIGH
+    rationale: >
+      Entities that fetch or persist themselves are Active Record objects —
+      not VIPER Entities. Persistence belongs in the Interactor's injected services.
+    bad_example: |
+      struct UserProfile {
+          var id: String
+          var name: String
+
+          // ❌ Firestore in Entity
+          static func fetch(id: String) async -> UserProfile? {
+              let doc = try? await Firestore.firestore().collection("users").document(id).getDocument()
+              return try? doc?.data(as: UserProfile.self)
+          }
+      }
+    fix_example: |
+      struct UserProfile: Codable, Equatable {
+          @DocumentID var id: String?
+          let name: String
+          let email: String
+      }
+      // Fetching lives in UserProfileService (injected into Interactor)
+
+  ENT-003:
+    description: Entities conform to Codable, Equatable, and Hashable where appropriate
+    severity: LOW
+    rationale: >
+      Codable enables Firestore/API decoding without boilerplate. Equatable
+      enables XCTAssertEqual in tests. Hashable enables Set/Dictionary use.
+      These conformances cost nothing and pay dividends in usability.
+    guidance: |
+      Codable    → always for Firestore/network entities
+      Equatable  → always (enables test assertions and SwiftUI diffing)
+      Hashable   → when used in Set or as Dictionary key
+      Identifiable → when used in ForEach/List
+    fix_example: |
+      struct Product: Codable, Equatable, Hashable, Identifiable {
+          @DocumentID var id: String?
+          let name: String
+          let price: Double
+          let categoryId: String
+      }
+
+  ENT-004:
+    description: Entities have no reference to other VIPER layers
+    severity: HIGH
+    rationale: >
+      An Entity that imports or references a Presenter, Interactor, Router,
+      or ViewController creates a dependency inversion violation and a
+      potential retain cycle.
+    detection: >
+      Search the Entity file for any imports or property types that match
+      Interactor, Presenter, Router, ViewController, or View naming patterns.
+    bad_example: |
+      struct CartItem {
+          var product: Product
+          var quantity: Int
+          weak var presenter: CartPresenterProtocol?  // ❌ reference to Presenter in Entity
+      }
+    fix_example: |
+      struct CartItem: Codable, Equatable, Identifiable {
+          let id: String
+          let product: Product
+          var quantity: Int
+      }
+
+  ENT-005:
+    description: Entities use value semantics (struct) unless reference semantics are required
+    severity: SUGGESTION
+    rationale: >
+      Structs copy on assignment, preventing accidental shared-state mutations.
+      Use class only when identity (===) or inheritance is required.
+    guidance: |
+      Prefer struct when:
+      - Entity represents a snapshot of data
+      - No shared mutation required
+      - Codable conformance (structs are simpler)
+
+      Use class when:
+      - Entity is referenced from multiple owners
+      - Identity comparison (===) is semantically meaningful

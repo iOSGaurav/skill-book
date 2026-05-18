@@ -1,0 +1,259 @@
+---
+# MVVM Architecture Rules
+# Specific to: MVVM (ObservableObject / @Observable / Combine)
+# Covers: ViewModel purity, View/ViewModel boundaries, threading, testability
+
+rule_set:
+  id: mvvm_architecture
+  name: MVVM Architecture
+  description: >
+    Design rules for MVVM iOS apps using ObservableObject, @Observable, or Combine.
+    Validates ViewModel purity, layer boundaries, threading safety, and testability.
+  enabled: always
+  variants:
+    classic:    "ObservableObject + @Published (iOS 13+)"
+    observable: "@Observable macro (iOS 17+)"
+    combine:    "ObservableObject + Combine Publishers"
+  reference: https://developer.apple.com/documentation/swift/observation
+
+checks:
+
+  MVVM-001:
+    description: ViewModel has zero SwiftUI imports
+    severity: HIGH
+    rationale: >
+      A ViewModel importing SwiftUI creates a direct dependency on the UI framework,
+      making it impossible to test without a UI host. ViewModels must be pure
+      Swift — no View types, no Colors, no Images from SwiftUI.
+    bad_example: |
+      import SwiftUI   // ❌
+
+      class ProfileViewModel: ObservableObject {
+          @Published var headerColor: Color = .blue  // SwiftUI type in ViewModel
+      }
+    fix_example: |
+      import Foundation  // ✅
+
+      class ProfileViewModel: ObservableObject {
+          @Published var headerColorHex: String = "#0000FF"  // plain value
+          // View converts this to Color
+      }
+
+  MVVM-002:
+    description: ViewModel has zero UIKit imports
+    severity: HIGH
+    rationale: >
+      Same as MVVM-001 but for UIKit. UIKit types (UIColor, UIImage) in ViewModels
+      couple the logic to the platform UI layer and break testability.
+    bad_example: |
+      import UIKit   // ❌
+
+      class AvatarViewModel: ObservableObject {
+          @Published var avatar: UIImage?
+      }
+    fix_example: |
+      import Foundation
+
+      class AvatarViewModel: ObservableObject {
+          @Published var avatarData: Data?  // ✅ View converts Data → Image
+      }
+
+  MVVM-003:
+    description: Views contain zero business logic
+    severity: HIGH
+    rationale: >
+      Business logic in Views cannot be unit-tested without UI infrastructure.
+      It also violates the single-responsibility principle: a View's only job
+      is to render state and delegate events.
+    examples_of_business_logic_in_views:
+      - Network calls in .onAppear
+      - Validation logic in body
+      - Price calculation before display
+      - Data filtering/sorting in the view
+    bad_example: |
+      var body: some View {
+          let discountedPrice = item.price * (1 - viewModel.discountRate)  // ❌ calculation in View
+          Text("$\(discountedPrice, specifier: "%.2f")")
+      }
+    fix_example: |
+      // ✅ Calculation in ViewModel
+      class CartItemViewModel: ObservableObject {
+          var formattedPrice: String {
+              let discounted = item.price * (1 - discountRate)
+              return String(format: "$%.2f", discounted)
+          }
+      }
+      // View just displays:
+      Text(viewModel.formattedPrice)
+
+  MVVM-004:
+    description: Protocol defined for every ViewModel
+    severity: MEDIUM
+    rationale: >
+      Without a protocol, test doubles and snapshot mocks cannot be injected.
+      The View becomes tightly coupled to the concrete ViewModel class.
+    fix_example: |
+      protocol ProfileViewModelProtocol: ObservableObject {
+          var displayName: String { get }
+          var avatarURL: URL? { get }
+          func loadProfile() async
+      }
+
+      class ProfileViewModel: ProfileViewModelProtocol { ... }
+      class MockProfileViewModel: ProfileViewModelProtocol { ... }  // for tests
+
+  MVVM-005:
+    description: "@Published properties mutated only on @MainActor or main thread"
+    severity: CRITICAL
+    rationale: >
+      SwiftUI observes @Published properties and schedules UI updates on the
+      main thread. Mutating @Published from a background thread causes a
+      runtime crash ("Publishing changes from background threads is not allowed").
+    bad_example: |
+      func loadUsers() {
+          URLSession.shared.dataTask(with: url) { data, _, _ in
+              self.users = decode(data)   // ❌ background thread crash
+          }.resume()
+      }
+    fix_example: |
+      @MainActor
+      func loadUsers() async {
+          users = try await userService.fetch()  // ✅ @MainActor guarantees main thread
+      }
+
+      // Or for non-async context:
+      func loadUsers() {
+          Task { @MainActor in
+              self.users = await userService.fetch()
+          }
+      }
+
+  MVVM-006:
+    description: Dependencies injected via initializer — no static or singleton access
+    severity: HIGH
+    rationale: >
+      Singletons make ViewModels impossible to test in isolation.
+      Injected dependencies can be replaced with mocks in unit tests.
+    bad_example: |
+      class OrderViewModel: ObservableObject {
+          func load() async {
+              orders = await NetworkManager.shared.fetchOrders()  // ❌ singleton
+          }
+      }
+    fix_example: |
+      class OrderViewModel: ObservableObject {
+          private let orderService: OrderServiceProtocol
+
+          init(orderService: OrderServiceProtocol = OrderService()) {
+              self.orderService = orderService
+          }
+
+          func load() async {
+              orders = try await orderService.fetchOrders()  // ✅ injected
+          }
+      }
+
+  MVVM-007:
+    description: "@Observable class does not use @Published (mutually exclusive)"
+    severity: HIGH
+    rationale: >
+      `@Observable` (iOS 17+) provides its own observation mechanism. Adding
+      `@Published` inside an `@Observable` class is redundant, causes unexpected
+      behavior, and generates a compiler warning.
+    version_applies: observable
+    bad_example: |
+      @Observable
+      class ProfileViewModel {
+          @Published var name: String = ""  // ❌ @Published inside @Observable
+      }
+    fix_example: |
+      @Observable
+      class ProfileViewModel {
+          var name: String = ""   // ✅ @Observable tracks this automatically
+      }
+
+  MVVM-008:
+    description: async ViewModel methods are @MainActor or dispatch results to main
+    severity: HIGH
+    rationale: >
+      async functions may resume on a background executor. Without @MainActor,
+      @Published mutations inside them may happen off the main thread.
+    bad_example: |
+      func submitOrder() async {
+          let result = try await orderAPI.submit()
+          self.confirmation = result  // ❌ may be off main thread
+      }
+    fix_example: |
+      @MainActor
+      func submitOrder() async {
+          let result = try await orderAPI.submit()
+          self.confirmation = result  // ✅ @MainActor guarantees main thread
+      }
+
+  MVVM-009:
+    description: ViewModel does not hold a strong reference to View
+    severity: CRITICAL
+    rationale: >
+      If a ViewModel holds a strong reference to its View, neither can
+      be deallocated. This is a retain cycle.
+    bad_example: |
+      class HomeViewModel: ObservableObject {
+          var view: HomeView   // ❌ strong reference back to View
+      }
+    fix_example: |
+      // ✅ Communication flows View → ViewModel only
+      // ViewModel publishes state; View observes it
+      // If callbacks needed, use closures (var onDismiss: (() -> Void)?)
+
+  MVVM-010:
+    description: Combine subscriptions stored in Set<AnyCancellable> and cancelled on deinit
+    severity: HIGH
+    rationale: >
+      Combine subscriptions without a cancellable store run forever and keep
+      the ViewModel alive, causing memory leaks.
+    version_applies: combine
+    bad_example: |
+      class SearchViewModel: ObservableObject {
+          init() {
+              searchSubject
+                  .debounce(for: 0.3, scheduler: RunLoop.main)
+                  .sink { self.search($0) }   // ❌ subscription has no owner — leaks
+          }
+      }
+    fix_example: |
+      class SearchViewModel: ObservableObject {
+          private var cancellables = Set<AnyCancellable>()
+
+          init() {
+              searchSubject
+                  .debounce(for: 0.3, scheduler: RunLoop.main)
+                  .sink { [weak self] query in self?.search(query) }
+                  .store(in: &cancellables)   // ✅ owned, cancelled on deinit
+          }
+      }
+
+  MVVM-011:
+    description: No business logic duplicated between ViewModel and Model layer
+    severity: MEDIUM
+    rationale: >
+      If pricing, validation, or formatting logic exists in both the Model
+      and ViewModel, the two can diverge. Single source of truth: put logic
+      in the layer closest to the data.
+
+  MVVM-012:
+    description: Error states exposed as @Published var error — not console-only
+    severity: MEDIUM
+    rationale: >
+      Errors printed to console are invisible to users and untestable.
+      Expose errors as observable state so the View can display them.
+    bad_example: |
+      catch {
+          print("Error: \(error)")   // ❌ user sees nothing
+      }
+    fix_example: |
+      @Published var errorMessage: String?
+
+      catch {
+          logger.error("Fetch failed: \(error)")
+          errorMessage = "Failed to load. Please try again."
+      }

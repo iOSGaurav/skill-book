@@ -1,0 +1,189 @@
+---
+# SwiftUI Bindings & Performance Rules
+# Specific to: MVVM architecture
+# Extends the base SwiftUI performance rules with MVVM-specific binding patterns
+
+rule_set:
+  id: swiftui_bindings_performance
+  name: SwiftUI Bindings & Performance
+  description: >
+    SwiftUI binding correctness and performance rules for MVVM.
+    Covers @StateObject vs @ObservedObject ownership, @EnvironmentObject
+    scope, @Observable fine-grained observation, and common rendering pitfalls.
+  enabled: always
+  reference: https://developer.apple.com/documentation/swiftui/managing-model-data-in-your-app
+
+checks:
+
+  PERF-001:
+    description: "@StateObject for ViewModel ownership; @ObservedObject in child Views"
+    severity: HIGH
+    rationale: >
+      @StateObject creates and owns the object lifetime — it must be used in
+      the View that creates the ViewModel. @ObservedObject observes an externally
+      provided object. Using @ObservedObject in the root View recreates it on
+      every parent re-render, resetting all state.
+    bad_example: |
+      struct HomeView: View {
+          @ObservedObject var vm = HomeViewModel()  // ❌ recreated on parent re-render
+      }
+    fix_example: |
+      struct HomeView: View {
+          @StateObject var vm = HomeViewModel()     // ✅ owned here, persists
+
+          var body: some View {
+              HomeContent(vm: vm)
+          }
+      }
+
+      struct HomeContent: View {
+          @ObservedObject var vm: HomeViewModel     // ✅ passed from parent
+      }
+
+  PERF-002:
+    description: "@EnvironmentObject only when ViewModel is truly shared across deep tree"
+    severity: MEDIUM
+    rationale: >
+      @EnvironmentObject is convenient but couples every View in the subtree
+      to the injected type. If only 1–2 Views need it, pass it directly via
+      @ObservedObject to keep the dependency graph explicit.
+    guideline: >
+      Use @EnvironmentObject when: (1) 3+ levels deep AND (2) multiple
+      unrelated Views in the tree need it. Otherwise pass explicitly.
+    bad_example: |
+      // ❌ Only used by one leaf View — @EnvironmentObject overengineered
+      .environmentObject(checkoutVM)  // injected at root
+      // ... 5 views later ...
+      struct CheckoutButton: View {
+          @EnvironmentObject var vm: CheckoutViewModel  // only consumer
+      }
+    fix_example: |
+      // ✅ Pass directly
+      struct CheckoutButton: View {
+          @ObservedObject var vm: CheckoutViewModel
+      }
+
+  PERF-003:
+    description: body contains no side effects
+    severity: HIGH
+    rationale: >
+      SwiftUI calls `body` unpredictably during layout passes and animations.
+      Side effects here (network calls, analytics, mutations) run multiple
+      times unexpectedly.
+    bad_example: |
+      var body: some View {
+          let _ = print("rendered")         // ❌
+          let _ = analytics.track("view")   // ❌
+          Text(viewModel.title)
+      }
+    fix_example: |
+      var body: some View {
+          Text(viewModel.title)
+              .onAppear { viewModel.appeared() }
+
+  PERF-004:
+    description: Heavy computations in ViewModel — not recalculated in body
+    severity: MEDIUM
+    rationale: >
+      Sorting, filtering, and date formatting in `body` run on every render cycle.
+      Pre-compute in the ViewModel and expose as a `@Published` derived property.
+    bad_example: |
+      var body: some View {
+          List(viewModel.orders.filter { $0.isActive }.sorted { $0.date > $1.date }) { ... }
+      }
+    fix_example: |
+      // In ViewModel
+      @Published private(set) var activeOrders: [Order] = []
+
+      func reloadOrders() async {
+          let all = try await orderService.fetch()
+          activeOrders = all.filter { $0.isActive }.sorted { $0.date > $1.date }
+      }
+      // In View
+      List(viewModel.activeOrders) { ... }
+
+  PERF-005:
+    description: ForEach/List use stable id keypaths — not .self on value types
+    severity: HIGH
+    rationale: >
+      `.self` as id means the entire collection is re-rendered when any property
+      of any element changes. A stable `\.id` enables surgical row updates.
+    bad_example: |
+      ForEach(orders, id: \.self) { order in ... }  // ❌ full re-render on any change
+    fix_example: |
+      ForEach(orders, id: \.id) { order in ... }    // ✅ only changed rows re-render
+
+  PERF-006:
+    description: AnyView not used in frequently-rendered subtrees
+    severity: MEDIUM
+    rationale: >
+      AnyView erases type identity. SwiftUI cannot diff erased types and
+      re-renders the entire subtree on every pass, defeating SwiftUI's
+      incremental update optimizations.
+    bad_example: |
+      ForEach(items) { item in
+          AnyView(item.isHighlighted ? HighlightRow(item: item) : NormalRow(item: item))
+      }
+    fix_example: |
+      ForEach(items) { item in
+          if item.isHighlighted { HighlightRow(item: item) }
+          else { NormalRow(item: item) }
+      }
+
+  PERF-007:
+    description: ".task{} preferred over .onAppear with Task for async ViewModel calls"
+    severity: LOW
+    rationale: >
+      `.task {}` auto-cancels when the view disappears. An unmanaged Task in
+      `.onAppear` continues running after navigation, causing state mutations
+      on deallocated objects.
+    bad_example: |
+      .onAppear {
+          Task { await viewModel.loadProfile() }  // ❌ not cancelled on disappear
+      }
+    fix_example: |
+      .task {
+          await viewModel.loadProfile()            // ✅ auto-cancelled
+      }
+
+  PERF-008:
+    description: NavigationStack used — not deprecated NavigationView
+    severity: MEDIUM
+    rationale: >
+      NavigationView is deprecated in iOS 16+. NavigationStack supports
+      programmatic path manipulation and fixes known NavigationView layout bugs.
+    bad_example: |
+      NavigationView { HomeView() }
+    fix_example: |
+      @StateObject var router = AppRouter()
+
+      NavigationStack(path: $router.path) {
+          HomeView()
+              .navigationDestination(for: AppRoute.self) { route in
+                  destinationView(for: route)
+              }
+      }
+
+  PERF-009:
+    description: "@Observable views use fine-grained observation (not whole-object)"
+    severity: MEDIUM
+    rationale: >
+      With `@Observable` (iOS 17+), SwiftUI only re-renders when properties
+      accessed in `body` change. Accessing the whole ViewModel object defeats
+      this — access only the specific properties the View needs.
+    version_applies: observable
+    bad_example: |
+      struct ProfileView: View {
+          var viewModel: ProfileViewModel  // @Observable — fine-grained by default
+          var body: some View {
+              let _ = viewModel  // ❌ accessing the whole object → re-renders on any property change
+              Text(viewModel.name)
+          }
+      }
+    fix_example: |
+      struct ProfileView: View {
+          var viewModel: ProfileViewModel
+          var body: some View {
+              Text(viewModel.name)   // ✅ only re-renders when .name changes
+          }
+      }

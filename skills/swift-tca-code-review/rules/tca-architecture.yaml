@@ -1,0 +1,253 @@
+---
+# TCA Architecture Rules
+# Specific to: The Composable Architecture (TCA)
+# Covers: Reducer design, Effect safety, @Dependency, Action conventions, TestStore
+
+rule_set:
+  id: tca_architecture
+  name: TCA Architecture
+  description: >
+    Correctness and design rules for The Composable Architecture (TCA).
+    Validates Reducer composition, Effect safety, dependency injection,
+    Action naming conventions, and test coverage.
+  enabled: always
+  version_profiles:
+    v0x:    "Legacy Reducer<State, Action, Environment>"
+    v1x:    "ReducerProtocol"
+    v1_7+:  "@Reducer macro"
+  reference: https://github.com/pointfreeco/swift-composable-architecture
+
+checks:
+
+  TCA-001:
+    description: Reducer composed correctly with Scope, ifLet, or forEach
+    severity: HIGH
+    rationale: >
+      Child features must be composed into the parent Reducer using TCA's
+      composition operators. Manual state mutation across feature boundaries
+      breaks unidirectional data flow.
+    version_applies: all
+    bad_example: |
+      // ❌ Manually forwarding child actions
+      case .child(let childAction):
+          state.child.count += 1   // mutating child state directly
+    fix_example: |
+      // ✅ TCA 1.x — compose with Scope
+      var body: some ReducerOf<Self> {
+          Scope(state: \.child, action: \.child) {
+              ChildFeature()
+          }
+          Reduce { state, action in
+              // parent logic only
+          }
+      }
+
+  TCA-002:
+    description: No side effects inside State or Action
+    severity: CRITICAL
+    rationale: >
+      State and Action must be pure value types. Side effects (network calls,
+      timers, UserDefaults) belong exclusively in Effects returned from the Reducer.
+      Violations make replay, testing, and time-travel debugging impossible.
+    bad_example: |
+      // ❌ CRITICAL: network call inside State computed property
+      struct AppState: Equatable {
+          var userName: String {
+              UserDefaults.standard.string(forKey: "name") ?? ""  // side effect in State
+          }
+      }
+
+      // ❌ CRITICAL: mutating shared mutable state in Action initializer
+      enum Action {
+          case load
+          init() { Analytics.shared.track("init") }  // side effect in Action
+      }
+    fix_example: |
+      // ✅ Pure State
+      struct AppState: Equatable {
+          var userName: String = ""
+      }
+
+      // ✅ Side effects in Effects only
+      case .load:
+          return .run { send in
+              let name = await dependencies.userDefaults.string(forKey: "name")
+              await send(.nameLoaded(name))
+          }
+
+  TCA-003:
+    description: All Effects return Effect<Action> — no void fire-and-forget dropped
+    severity: HIGH
+    rationale: >
+      An Effect that is not returned from the Reducer is silently dropped.
+      The action is never dispatched, callbacks never fire, and the bug is
+      invisible at the call site.
+    bad_example: |
+      case .save:
+          Effect.run { _ in await self.save() }   // ❌ not returned — silently dropped
+          return .none
+    fix_example: |
+      case .save:
+          return .run { _ in await self.save() }  // ✅ returned
+
+  TCA-004:
+    description: "@Dependency used for all external services — no singleton access"
+    severity: HIGH
+    rationale: >
+      Direct singleton access (NetworkManager.shared, Analytics.shared) bypasses
+      TCA's dependency injection, making tests non-deterministic and impossible
+      to run in parallel.
+    bad_example: |
+      case .load:
+          return .run { send in
+              let user = await NetworkManager.shared.fetchUser()  // ❌ singleton
+              await send(.userLoaded(user))
+          }
+    fix_example: |
+      // Define client
+      struct UserClient {
+          var fetch: () async throws -> User
+      }
+      extension UserClient: DependencyKey { ... }
+
+      // Use in Reducer
+      @Dependency(\.userClient) var userClient
+
+      case .load:
+          return .run { send in
+              let user = try await userClient.fetch()
+              await send(.userLoaded(user))
+          }
+
+  TCA-005:
+    description: TestStore exists for every new Reducer
+    severity: HIGH
+    rationale: >
+      TCA's TestStore enforces exhaustive action assertion. A Reducer without
+      a TestStore-based test has zero coverage of its state transitions.
+    detection: >
+      For each new *Feature.swift or *Reducer.swift file introduced,
+      check for a corresponding *Tests.swift using TestStore.
+    fix_example: |
+      @MainActor
+      final class CartFeatureTests: XCTestCase {
+          func testAddItem() async {
+              let store = TestStore(initialState: CartFeature.State()) {
+                  CartFeature()
+              } withDependencies: {
+                  $0.cartClient = .mock
+              }
+
+              await store.send(.addItemTapped(item)) {
+                  $0.items = [item]
+              }
+          }
+      }
+
+  TCA-006:
+    description: Action names follow noun.verb convention
+    severity: LOW
+    rationale: >
+      TCA's recommended convention (e.g. loginButton.tapped, userData.loaded)
+      makes action logs readable and searchable. Verb-first names (didTapLogin)
+      read as imperative commands rather than events.
+    bad_example: |
+      enum Action {
+          case didTapLoginButton   // ❌ verb-first, imperative
+          case fetchedUser         // ❌ past tense, ambiguous
+          case loadingFailed       // ❌ no noun context
+      }
+    fix_example: |
+      enum Action {
+          case loginButton(LoginButtonAction)
+          enum LoginButtonAction { case tapped }
+
+          case userData(UserDataAction)
+          enum UserDataAction { case loaded(User), failed(Error) }
+      }
+      // Or flat with dot-separation if project style allows:
+      // case loginButtonTapped
+      // Note: adopt the convention already in use in the project
+
+  TCA-007:
+    description: "@Reducer macro used when project is on TCA 1.7+"
+    severity: MEDIUM
+    rationale: >
+      The @Reducer macro eliminates ReducerProtocol boilerplate and enables
+      the ReducerBuilder DSL. Using the deprecated `ReducerProtocol` conformance
+      on a 1.7+ project creates inconsistency.
+    version_applies: v1_7+
+    bad_example: |
+      // ❌ Deprecated on TCA 1.7+
+      struct CartFeature: ReducerProtocol {
+          struct State: Equatable { ... }
+          enum Action { ... }
+          func reduce(into state: inout State, action: Action) -> EffectTask<Action> { ... }
+      }
+    fix_example: |
+      // ✅ TCA 1.7+
+      @Reducer
+      struct CartFeature {
+          @ObservableState
+          struct State: Equatable { ... }
+          enum Action { ... }
+          var body: some ReducerOf<Self> { ... }
+      }
+
+  TCA-008:
+    description: No Store captured strongly in closures (retain cycle)
+    severity: CRITICAL
+    rationale: >
+      Capturing a Store strongly inside a closure that the Store itself holds
+      creates a retain cycle. The Store never deallocates, and every Effect
+      it holds continues to fire.
+    bad_example: |
+      // ❌ Store → closure → store (retain cycle)
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+          store.send(.timeout)   // strong capture
+      }
+    fix_example: |
+      // ✅ Option 1: use Effect.run — no manual capture needed
+      case .startTimer:
+          return .run { send in
+              try await Task.sleep(for: .seconds(1))
+              await send(.timeout)
+          }
+
+      // ✅ Option 2: weak capture if external scheduler required
+      DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak store] in
+          store?.send(.timeout)
+      }
+
+  TCA-009:
+    description: withDependencies used in tests — not manual Environment override
+    severity: MEDIUM
+    rationale: >
+      TCA 1.x removed Environment in favour of @Dependency. Tests that
+      manually set @Dependency values without withDependencies may bleed state
+      between test cases.
+    version_applies: v1x, v1_7+
+    fix_example: |
+      let store = TestStore(initialState: Feature.State()) {
+          Feature()
+      } withDependencies: {
+          $0.userClient.fetch = { .mock }
+          $0.date = .constant(Date(timeIntervalSince1970: 0))
+      }
+
+  TCA-010:
+    description: "@Shared / PersistenceKey used for shared state (not deep State nesting)"
+    severity: MEDIUM
+    rationale: >
+      Passing shared state (user settings, auth status) deep through nested
+      State trees creates tight coupling. TCA 1.5+ @Shared provides a type-safe
+      shared state mechanism.
+    version_applies: v1_7+
+    fix_example: |
+      @Reducer
+      struct AppFeature {
+          struct State: Equatable {
+              @Shared(.appStorage("theme")) var theme: Theme = .system
+              // instead of: passing theme through 5 layers of child State
+          }
+      }

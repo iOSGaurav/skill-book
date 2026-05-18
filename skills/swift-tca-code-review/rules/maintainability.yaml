@@ -1,0 +1,126 @@
+---
+# Maintainability Rules
+# Shared across all architecture skills (TCA, MVVM, VIPER)
+# Applies to all Swift source files
+
+rule_set:
+  id: maintainability
+  name: Maintainability
+  description: Code quality, readability, and long-term maintainability rules for Swift
+  enabled: always
+  thresholds:
+    max_function_lines: 40
+    max_file_lines: 300
+
+checks:
+
+  MAINT-001:
+    description: No function or method exceeds 40 lines
+    severity: MEDIUM
+    rationale: >
+      Functions over 40 lines typically handle more than one responsibility.
+      They are harder to test, review, and reason about. Break them up.
+    detection: Count lines between opening and closing brace of each function.
+    fix_guidance: >
+      Extract cohesive logic into private helper methods with descriptive names.
+      Each function should answer one question or perform one action.
+    bad_example: |
+      func processOrder(_ order: Order) {
+          // 50+ lines doing: validation, pricing, discount, Firebase write, analytics
+      }
+    fix_example: |
+      func processOrder(_ order: Order) {
+          guard isValid(order) else { return }
+          let price = calculatePrice(for: order)
+          let discounted = applyDiscounts(price, order: order)
+          save(order, finalPrice: discounted)
+          trackEvent(.orderProcessed, order: order)
+      }
+
+  MAINT-002:
+    description: No file exceeds 300 lines
+    severity: MEDIUM
+    rationale: >
+      Files over 300 lines usually contain multiple types or a single type
+      that has grown beyond its single responsibility. Split by concern.
+    detection: Count total lines in the file (excluding blank lines and comments).
+    fix_guidance: >
+      Extract inner types, extensions, or helper types into separate files.
+      Group related functionality using MARK comments before splitting.
+
+  MAINT-003:
+    description: Magic numbers extracted to named constants or enum
+    severity: LOW
+    rationale: >
+      Unexplained numeric literals force readers to guess their meaning
+      and make global changes error-prone.
+    bad_example: |
+      if retryCount > 3 { ... }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { ... }
+    fix_example: |
+      enum Config {
+          static let maxRetryCount = 3
+          static let debounceDelay: TimeInterval = 0.3
+      }
+      if retryCount > Config.maxRetryCount { ... }
+      DispatchQueue.main.asyncAfter(deadline: .now() + Config.debounceDelay) { ... }
+
+  MAINT-004:
+    description: TODO and FIXME comments include a ticket reference
+    severity: LOW
+    rationale: >
+      Bare TODO/FIXME comments accumulate indefinitely. A ticket reference
+      creates accountability and makes them searchable.
+    bad_example: |
+      // TODO: fix this later
+      // FIXME: crashes on iPad
+    fix_example: |
+      // TODO: [PROJ-423] replace with async/await once iOS 16 is minimum
+      // FIXME: [PROJ-891] layout breaks on iPad — tracked in sprint 14
+
+  MAINT-005:
+    description: No force unwrap (!) on non-guaranteed optionals
+    severity: HIGH
+    rationale: >
+      Force unwraps on values that can be nil in production cause crashes that
+      are hard to reproduce. Use guard, if let, or provide a sensible default.
+    exceptions:
+      - "IBOutlets (guaranteed by Interface Builder)"
+      - "Values proven non-nil by construction (document why with a comment)"
+    bad_example: |
+      let url = URL(string: serverURL)!           // crashes if serverURL is malformed
+      let cell = tableView.dequeueReusableCell(withIdentifier: "Cell") as! MyCell
+    fix_example: |
+      guard let url = URL(string: serverURL) else {
+          logger.error("Invalid server URL: \(serverURL)")
+          return
+      }
+
+      guard let cell = tableView.dequeueReusableCell(withIdentifier: MyCell.reuseID) as? MyCell else {
+          assertionFailure("Cell not registered")
+          return UITableViewCell()
+      }
+
+  MAINT-006:
+    description: guard used for early exits instead of deeply nested if let
+    severity: LOW
+    rationale: >
+      guard statements push the happy path to the left margin and make
+      early-exit conditions immediately visible. Deep nesting obscures intent.
+    bad_example: |
+      func process(_ data: Data?) {
+          if let data = data {
+              if let decoded = try? decode(data) {
+                  if decoded.isValid {
+                      handle(decoded)
+                  }
+              }
+          }
+      }
+    fix_example: |
+      func process(_ data: Data?) {
+          guard let data else { return }
+          guard let decoded = try? decode(data) else { return }
+          guard decoded.isValid else { return }
+          handle(decoded)
+      }

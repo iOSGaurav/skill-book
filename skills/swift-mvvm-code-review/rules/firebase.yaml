@@ -1,0 +1,142 @@
+---
+# Firebase Rules
+# Shared across all architecture skills (TCA, MVVM, VIPER)
+# Covers: Firestore, Firebase Auth, Firebase Storage
+# Note: FB-007 is VIPER-specific (Interactor-only constraint) — other skills use a relaxed variant
+
+rule_set:
+  id: firebase
+  name: Firebase
+  description: Safe Firebase Firestore, Auth, and Storage usage patterns for iOS
+  enabled: when_firebase_imported
+  feature_flags: [FirebaseFirestore, FirebaseAuth, FirebaseStorage]
+  reference: https://firebase.google.com/docs/firestore/best-practices
+
+checks:
+
+  FB-001:
+    description: Firestore queries have .limit() — no unbounded reads
+    severity: HIGH
+    rationale: >
+      Unbounded Firestore queries read every matching document.
+      On large collections this causes excessive read costs, slow UI,
+      and potential timeouts.
+    bad_example: |
+      // ❌ Reads all orders — no limit
+      db.collection("orders")
+        .whereField("userId", isEqualTo: uid)
+        .getDocuments { ... }
+    fix_example: |
+      // ✅ Paginated with limit
+      db.collection("orders")
+        .whereField("userId", isEqualTo: uid)
+        .order(by: "createdAt", descending: true)
+        .limit(to: 20)
+        .getDocuments { ... }
+
+  FB-002:
+    description: All async Firebase calls in do-catch; errors surfaced to user
+    severity: HIGH
+    rationale: >
+      Silent failures on Firebase calls leave users in broken states with
+      no feedback. All errors must be caught and communicated.
+    bad_example: |
+      // ❌ Error silently ignored
+      try? await db.collection("users").document(uid).setData(data)
+    fix_example: |
+      // ✅ Error caught and exposed
+      do {
+          try await db.collection("users").document(uid).setData(data)
+      } catch {
+          self.errorMessage = error.localizedDescription
+      }
+
+  FB-003:
+    description: No hardcoded Firestore collection or document IDs
+    severity: MEDIUM
+    rationale: >
+      Magic strings for Firestore paths make typos impossible to detect at
+      compile time and break silently at runtime.
+    bad_example: |
+      db.collection("usrs").document("profile")  // typo is silent
+    fix_example: |
+      enum FirestorePath {
+          static let users = "users"
+          static let profile = "profile"
+      }
+      db.collection(FirestorePath.users).document(FirestorePath.profile)
+
+  FB-004:
+    description: Auth state observed via addStateDidChangeListener, not polled
+    severity: HIGH
+    rationale: >
+      Polling Auth.auth().currentUser misses state changes (token refresh,
+      sign-out from another device). The listener is the correct reactive approach.
+    bad_example: |
+      // ❌ Point-in-time check — misses changes
+      Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { _ in
+          let user = Auth.auth().currentUser
+      }
+    fix_example: |
+      // ✅ Reactive listener
+      Auth.auth().addStateDidChangeListener { [weak self] _, user in
+          self?.currentUser = user
+      }
+
+  FB-005:
+    description: Codable / @DocumentID used for type-safe Firestore decoding
+    severity: MEDIUM
+    rationale: >
+      Manual dictionary key access produces silent nil values and requires
+      string literals. Codable + @DocumentID provides compile-time safety.
+    bad_example: |
+      // ❌ Manual, error-prone
+      let name = document.data()?["nme"] as? String ?? ""  // typo silently nil
+    fix_example: |
+      struct UserProfile: Codable {
+          @DocumentID var id: String?
+          let name: String
+          let email: String
+      }
+      let profile = try document.data(as: UserProfile.self)
+
+  FB-006:
+    description: FieldValue.serverTimestamp() used with offline awareness
+    severity: MEDIUM
+    rationale: >
+      Server timestamps resolve asynchronously. Reading a field immediately
+      after a write while offline returns nil, causing crashes if force-unwrapped.
+    bad_example: |
+      // ❌ May be nil while offline — force unwrap crashes
+      let ts = document["createdAt"] as! Timestamp
+    fix_example: |
+      // ✅ Handle the pending state
+      if let ts = document["createdAt"] as? Timestamp {
+          return ts.dateValue()
+      } else {
+          return Date()  // pending server timestamp
+      }
+
+  FB-007:
+    description: Firebase calls are made in the correct architectural layer
+    severity: CRITICAL
+    rationale: >
+      Each architecture has a designated layer for data access:
+      TCA → Effect / @Dependency client; MVVM → ViewModel;
+      VIPER → Interactor only. Calls in View/Presenter/Router break
+      the architecture contract and make testing impossible.
+    architecture_specific:
+      TCA:   "Firebase calls inside Effect.run or @Dependency client, never inline in Reducer"
+      MVVM:  "Firebase calls in ViewModel methods, never directly in View body or .onAppear"
+      VIPER: "Firebase calls only in Interactor — never in View, Presenter, or Router"
+
+  FB-008:
+    description: Fields written to Firestore match security rules expectations
+    severity: HIGH
+    rationale: >
+      Writing unexpected fields causes silent security rule rejections.
+      Ensure the Codable model matches the fields allowed by security rules.
+    guidance: >
+      Cross-reference the Codable struct's CodingKeys with the Firestore
+      security rules allow write conditions. Flag if the model writes fields
+      not covered by the rules.

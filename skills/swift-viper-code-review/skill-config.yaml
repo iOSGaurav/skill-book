@@ -1,0 +1,135 @@
+---
+# Swift VIPER Code Review — Skill Configuration
+# Architecture: VIPER (View · Interactor · Presenter · Entity · Router)
+# Version: 1.0.0
+# Rules are defined in separate files — edit them independently.
+
+skill:
+  name: swift-viper-code-review
+  version: "1.0.0"
+  architecture: VIPER
+
+context_detection:
+  priority_order:
+    - path: "CLAUDE.md"
+      note: "Highest priority — especially important for VIPER layer naming conventions"
+    - path: ".swiftlint.yml"
+    - path: "Package.swift"
+    - path: "Podfile.lock"
+    - path: ".github/workflows/*.yml"
+
+  layer_naming_detection:
+    view:       ["*View", "*ViewController", "*DisplayLogic"]
+    interactor: ["*Interactor", "*InteractorImpl", "*BusinessLogic"]
+    presenter:  ["*Presenter", "*PresenterImpl", "*PresentationLogic"]
+    entity:     ["*Entity", "*Model", "*DataModel", "*Response"]
+    router:     ["*Router", "*RouterImpl", "*Wireframe", "*RoutingLogic"]
+    builder:    ["*Builder", "*Module", "*Configurator", "*Assembly"]
+    note: "Detect from CLAUDE.md or existing project patterns before applying defaults"
+
+  feature_flags:
+    firebase: ["FirebaseFirestore", "FirebaseAuth", "FirebaseStorage"]
+    snapshot: ["SnapshotTesting"]
+
+# ============================================================
+# RULE FILES
+# Edit individual files to change checks for that layer/dimension.
+# ============================================================
+
+dimensions:
+
+  viper_view:
+    rules_file: "rules/viper-view.yaml"
+    enabled: always
+
+  viper_interactor:
+    rules_file: "rules/viper-interactor.yaml"
+    enabled: always
+
+  viper_presenter:
+    rules_file: "rules/viper-presenter.yaml"
+    enabled: always
+
+  viper_entity:
+    rules_file: "rules/viper-entity.yaml"
+    enabled: always
+
+  viper_router:
+    rules_file: "rules/viper-router.yaml"
+    enabled: always
+
+  viper_module_assembly:
+    rules_file: "rules/viper-module-assembly.yaml"
+    enabled: always
+
+  accessibility:
+    rules_file: "rules/accessibility.yaml"
+    enabled: always
+
+  firebase:
+    rules_file: "rules/firebase.yaml"
+    enabled: when_firebase_imported
+
+  snapshot_testing:
+    rules_file: "rules/snapshot-testing.yaml"
+    enabled: when_snapshot_imported
+
+  maintainability:
+    rules_file: "rules/maintainability.yaml"
+    enabled: always
+
+  security:
+    rules_file: "rules/security.yaml"
+    enabled: always
+
+  combine:
+    rules_file: "rules/combine.yaml"
+    enabled: when_combine_imported
+
+  swiftui_common:
+    rules_file: "rules/swiftui.yaml"
+    enabled: always
+
+  performance:
+    rules_file: "rules/performance.yaml"
+    enabled: always
+
+  github_pr_hygiene:
+    rules_file: "rules/github-pr-hygiene.yaml"
+    enabled: always
+
+# ============================================================
+# SEVERITY & MERGE SIGNAL
+# ============================================================
+
+severity_levels:
+  CRITICAL: { action: "Block merge",       emoji: "🔴" }
+  HIGH:     { action: "Fix before merge",   emoji: "🟠" }
+  MEDIUM:   { action: "Fix if time allows", emoji: "🟡" }
+  LOW:      { action: "Fix if easy",        emoji: "🔵" }
+  SUGGESTION: { action: "Consider later",   emoji: "💡" }
+
+merge_signal:
+  not_ready:  { condition: "any CRITICAL OR 3+ HIGH",   label: "🔴 Not ready to merge" }
+  needs_work: { condition: "1–2 HIGH OR 4+ MEDIUM",     label: "🟡 Minor fixes required" }
+  ready:      { condition: "only LOW or SUGGESTION",    label: "🟢 Ready to merge" }
+
+# ============================================================
+# GUARDRAILS
+# ============================================================
+
+guardrails:
+  - "Never modify source files"
+  - "Never delete or rename files"
+  - "Never run destructive git commands"
+  - "Never update snapshot baselines — recommend the command; do not run it"
+  - "Ask before expanding scope beyond original input"
+  - "CLAUDE.md overrides all defaults"
+  - "Detect layer naming convention before applying defaults (Wireframe = Router is valid)"
+
+fallback:
+  no_swift_files:       "No Swift files detected. Please provide a file path, PR number, or directory."
+  layer_naming_unknown: "Default naming patterns applied. Override via CLAUDE.md if project uses custom names."
+  module_incomplete:    "Missing layers flagged under Module Assembly (MOD-001) as HIGH."
+  file_unreadable:      "[SKIPPED: File unreadable — <path>]"
+  unverifiable_finding: "[UNVERIFIABLE — needs runtime test]"

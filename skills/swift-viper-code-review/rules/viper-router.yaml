@@ -1,0 +1,171 @@
+---
+# VIPER Router Layer Rules
+# Responsibility: All navigation logic and module assembly
+
+rule_set:
+  id: viper_router
+  name: VIPER — Router Layer
+  description: >
+    Rules for the Router (also called Wireframe) layer in VIPER.
+    The Router owns all navigation: creating new modules, pushing/presenting
+    ViewControllers, and handling deep links. It also assembles the VIPER
+    module by creating all 5 layers and wiring their protocol references.
+    It must contain no business logic and no data fetching.
+  enabled: always
+  layer: Router
+  naming_patterns: ["*Router", "*RouterImpl", "*Wireframe", "*RoutingLogic"]
+
+checks:
+
+  ROUT-001:
+    description: All navigation lives in Router — no push/present in View or Presenter
+    severity: HIGH
+    rationale: >
+      Navigation logic scattered across View and Presenter makes the app flow
+      impossible to test or modify in isolation. Centralising navigation in
+      the Router makes deep-link support and flow testing trivial.
+    detection: >
+      Search View and Presenter files for: navigationController?.push,
+      present(_:animated:), dismiss, show(_:sender:), performSegue.
+    bad_example: |
+      // ❌ Navigation in Presenter
+      class ProfilePresenter {
+          func editButtonTapped() {
+              let vc = EditProfileBuilder.build()
+              viewController?.navigationController?.pushViewController(vc, animated: true)
+          }
+      }
+    fix_example: |
+      // ✅ Presenter asks Router to navigate
+      class ProfilePresenter {
+          func editButtonTapped() {
+              router?.navigateToEditProfile()
+          }
+      }
+
+      class ProfileRouter: ProfileRouterProtocol {
+          weak var viewController: UIViewController?
+
+          func navigateToEditProfile() {
+              let editVC = EditProfileBuilder.build()
+              viewController?.navigationController?.pushViewController(editVC, animated: true)
+          }
+      }
+
+  ROUT-002:
+    description: Router assembles the VIPER module (creates all 5 layers and wires protocols)
+    severity: HIGH
+    rationale: >
+      Module assembly in one place makes dependency injection explicit and
+      auditable. Assembly spread across AppDelegate, storyboards, or individual
+      layers hides dependencies.
+    fix_example: |
+      enum LoginBuilder {
+          static func build() -> UIViewController {
+              // 1. Create all layers
+              let view = LoginViewController()
+              let interactor = LoginInteractor(
+                  authService: FirebaseAuthService(),
+                  analyticsService: FirebaseAnalyticsService()
+              )
+              let presenter = LoginPresenter()
+              let router = LoginRouter()
+
+              // 2. Wire protocol references
+              view.presenter = presenter
+              presenter.view = view
+              presenter.interactor = interactor
+              presenter.router = router
+              interactor.output = presenter
+              router.viewController = view
+
+              return view
+          }
+      }
+
+  ROUT-003:
+    description: Router holds weak var viewController — not strong
+    severity: CRITICAL
+    rationale: >
+      The ViewController (View) owns the Router (directly or indirectly through
+      the Presenter). If the Router also strongly owns the ViewController,
+      neither can be released — retain cycle.
+    bad_example: |
+      class LoginRouter: LoginRouterProtocol {
+          var viewController: LoginViewController?   // ❌ strong — retain cycle
+      }
+    fix_example: |
+      class LoginRouter: LoginRouterProtocol {
+          weak var viewController: UIViewController?   // ✅ weak, typed to base class
+      }
+
+  ROUT-004:
+    description: Router has no business logic and no data fetching
+    severity: HIGH
+    rationale: >
+      Routing logic is: "given this event, navigate to this screen."
+      Any decision based on data (e.g., "if user.isPremium, go to PremiumScreen")
+      is business logic and belongs in the Interactor or Presenter.
+    bad_example: |
+      func handleCheckoutTapped() {
+          // ❌ Business rule in Router
+          if cartInteractor.items.count == 0 {
+              view?.showEmptyCartAlert()
+          } else {
+              let vc = CheckoutBuilder.build()
+              viewController?.present(vc, animated: true)
+          }
+      }
+    fix_example: |
+      // Presenter makes the decision; Router just navigates
+      func navigateToCheckout() {   // ✅ called only when Presenter decides it's valid
+          let vc = CheckoutBuilder.build()
+          viewController?.present(vc, animated: true)
+      }
+
+  ROUT-005:
+    description: Router protocol defined so Presenter does not depend on concrete Router
+    severity: MEDIUM
+    rationale: >
+      Protocol-typed router allows injecting a mock router in Presenter tests,
+      verifying that the correct navigation was triggered.
+    fix_example: |
+      protocol LoginRouterProtocol: AnyObject {
+          func navigateToHome()
+          func navigateToForgotPassword()
+          func navigateToSignUp()
+      }
+
+      class LoginPresenter {
+          var router: LoginRouterProtocol?   // ✅ typed to protocol
+      }
+
+  ROUT-006:
+    description: Child module creation goes through Router — not Presenter or View
+    severity: HIGH
+    rationale: >
+      Creating a child VIPER module requires assembling all 5 layers.
+      This is the Router's job. Doing it in a Presenter couples the Presenter
+      to the child module's assembly, breaking the boundary.
+    bad_example: |
+      // ❌ Presenter assembling a child module
+      class HomePresenter {
+          func profileTapped() {
+              let profileVC = ProfileBuilder.build()   // assembly in Presenter
+              router?.present(profileVC)
+          }
+      }
+    fix_example: |
+      // ✅ Router assembles and navigates
+      class HomeRouter: HomeRouterProtocol {
+          func navigateToProfile(userId: String) {
+              let profileVC = ProfileBuilder.build(userId: userId)
+              viewController?.navigationController?.pushViewController(profileVC, animated: true)
+          }
+      }
+
+      class HomePresenter {
+          func profileTapped(userId: String) {
+              router?.navigateToProfile(userId: userId)  // Presenter just triggers
+          }
+      }

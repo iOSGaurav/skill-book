@@ -1,0 +1,183 @@
+---
+# VIPER Interactor Layer Rules
+# Responsibility: All business logic and use-case execution
+
+rule_set:
+  id: viper_interactor
+  name: VIPER — Interactor Layer
+  description: >
+    Rules for the Interactor layer in VIPER. The Interactor contains all business
+    logic and use-case execution. It has no UI knowledge, no navigation awareness,
+    and communicates results back to the Presenter via an output protocol.
+    All external dependencies (network, database, Firebase) must be injected.
+  enabled: always
+  layer: Interactor
+  naming_patterns: ["*Interactor", "*InteractorImpl", "*BusinessLogic"]
+
+checks:
+
+  INT-001:
+    description: Interactor has zero UIKit or SwiftUI imports
+    severity: HIGH
+    rationale: >
+      An Interactor importing UIKit or SwiftUI couples business logic to the
+      UI layer. The Interactor must run in isolation — it should be testable
+      in a plain XCTestCase with no UI infrastructure.
+    bad_example: |
+      import UIKit    // ❌ no UI imports in Interactor
+      import SwiftUI  // ❌
+
+      class LoginInteractor: LoginInteractorProtocol {
+          func login(email: String, password: String) {
+              ...
+          }
+      }
+    fix_example: |
+      import Foundation   // ✅ plain Foundation only
+
+      class LoginInteractor: LoginInteractorProtocol {
+          func login(email: String, password: String) async {
+              ...
+          }
+      }
+
+  INT-002:
+    description: Interactor sends results to Presenter via InteractorOutputProtocol
+    severity: HIGH
+    rationale: >
+      The Interactor must never call the View directly. All output goes to
+      the Presenter, which then formats it for the View. This keeps the
+      Interactor UI-agnostic and independently testable.
+    bad_example: |
+      class LoginInteractor {
+          var view: LoginViewProtocol?   // ❌ Interactor skips Presenter, calls View
+
+          func login() async {
+              let user = try await authService.login()
+              view?.showWelcome(user.name)   // ❌
+          }
+      }
+    fix_example: |
+      protocol LoginInteractorOutputProtocol: AnyObject {
+          func loginSucceeded(user: User)
+          func loginFailed(error: Error)
+      }
+
+      class LoginInteractor {
+          weak var output: LoginInteractorOutputProtocol?   // ✅ talks to Presenter
+
+          func login() async {
+              do {
+                  let user = try await authService.login()
+                  output?.loginSucceeded(user: user)
+              } catch {
+                  output?.loginFailed(error: error)
+              }
+          }
+      }
+
+  INT-003:
+    description: Interactor uses Entity objects — not raw dictionaries or Any
+    severity: MEDIUM
+    rationale: >
+      Raw dictionaries and `Any` types require runtime casting and produce
+      silent nil values. Entities are type-safe and document the data contract.
+    bad_example: |
+      func processOrder(_ data: [String: Any]) {
+          let price = data["price"] as? Double ?? 0   // ❌ raw dictionary, silent cast
+      }
+    fix_example: |
+      func processOrder(_ order: Order) {   // ✅ typed Entity
+          let total = order.price * Double(order.quantity)
+      }
+
+  INT-004:
+    description: All external dependencies injected via protocol — no singleton access
+    severity: HIGH
+    rationale: >
+      Singletons make the Interactor impossible to test in isolation.
+      Injected protocol-typed dependencies can be replaced with mocks
+      in unit tests.
+    bad_example: |
+      class CartInteractor {
+          func checkout() async {
+              let result = await PaymentManager.shared.processPayment()  // ❌ singleton
+          }
+      }
+    fix_example: |
+      class CartInteractor {
+          private let paymentService: PaymentServiceProtocol
+          private let analyticsService: AnalyticsServiceProtocol
+
+          init(paymentService: PaymentServiceProtocol,
+               analyticsService: AnalyticsServiceProtocol) {
+              self.paymentService = paymentService
+              self.analyticsService = analyticsService
+          }
+      }
+
+  INT-005:
+    description: Interactor has zero navigation calls
+    severity: CRITICAL
+    rationale: >
+      Navigation belongs exclusively in the Router. An Interactor that
+      navigates violates VIPER's contract and makes navigation logic
+      untestable in isolation.
+    bad_example: |
+      func loginSucceeded() {
+          let vc = HomeBuilder.build()
+          rootVC?.present(vc, animated: true)   // ❌ navigation in Interactor
+      }
+    fix_example: |
+      func loginSucceeded(user: User) {
+          output?.loginSucceeded(user: user)    // ✅ Presenter → Router navigates
+      }
+
+  INT-006:
+    description: Interactor output protocol reference is weak (prevents retain cycle)
+    severity: CRITICAL
+    rationale: >
+      The module assembly wires: View → Presenter → Interactor.output → Presenter.
+      If the Interactor holds a strong reference to Presenter (the output),
+      both stay alive forever — neither can be released.
+    bad_example: |
+      class LoginInteractor {
+          var output: LoginInteractorOutputProtocol?   // ❌ strong — retain cycle
+      }
+    fix_example: |
+      class LoginInteractor {
+          weak var output: LoginInteractorOutputProtocol?  // ✅ weak breaks the cycle
+      }
+      // Note: LoginInteractorOutputProtocol must be AnyObject-constrained:
+      protocol LoginInteractorOutputProtocol: AnyObject { ... }
+
+  INT-007:
+    description: Interactor is unit testable in isolation
+    severity: HIGH
+    rationale: >
+      The Interactor contains all business logic. If it cannot be tested
+      without a live network, Firebase, or UIViewController, the logic
+      has zero reliable coverage.
+    test_requirements:
+      - "Mock all dependencies via protocol injection"
+      - "Verify output protocol methods are called with correct data"
+      - "Cover success, failure, and edge case paths"
+    fix_example: |
+      final class LoginInteractorTests: XCTestCase {
+          var sut: LoginInteractor!
+          var mockOutput: MockLoginInteractorOutput!
+          var mockAuth: MockAuthService!
+
+          override func setUp() {
+              mockAuth = MockAuthService()
+              mockOutput = MockLoginInteractorOutput()
+              sut = LoginInteractor(authService: mockAuth)
+              sut.output = mockOutput
+          }
+
+          func testLoginSuccess() async {
+              mockAuth.stubbedUser = User(id: "123", name: "Jane")
+              await sut.login(email: "jane@example.com", password: "secret")
+              XCTAssertEqual(mockOutput.capturedUser?.id, "123")
+          }
+      }

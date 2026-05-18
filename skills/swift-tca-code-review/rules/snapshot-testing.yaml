@@ -1,0 +1,111 @@
+---
+# Snapshot Testing Rules
+# Shared across all architecture skills (TCA, MVVM, VIPER)
+# Library: pointfreeco/swift-snapshot-testing
+# SNAP-007 is architecture-specific (mock injection requirement differs per arch)
+
+rule_set:
+  id: snapshot_testing
+  name: Snapshot Testing
+  description: Snapshot test coverage requirements for iOS SwiftUI and UIKit screens
+  enabled: when_snapshot_imported
+  feature_flags: [SnapshotTesting]
+  reference: https://github.com/pointfreeco/swift-snapshot-testing
+
+checks:
+
+  SNAP-001:
+    description: Every new screen or component has a *SnapshotTests.swift file
+    severity: HIGH
+    rationale: >
+      Without a snapshot baseline, visual regressions are undetected until
+      a human notices in review or production. Every new screen needs coverage.
+    detection: >
+      For each new View/ViewController file introduced in the diff, check for
+      a corresponding *SnapshotTests.swift file in the test target.
+    fix_example: |
+      // CheckoutView.swift added → must have:
+      // CheckoutViewSnapshotTests.swift (or CheckoutSnapshotTests.swift)
+
+  SNAP-002:
+    description: Snapshots cover both light and dark mode
+    severity: HIGH
+    rationale: >
+      Many iOS apps ship dark mode regressions because snapshots only cover
+      one appearance. Both must be verified.
+    bad_example: |
+      // ❌ Only light mode
+      assertSnapshot(matching: view, as: .image)
+    fix_example: |
+      // ✅ Both appearances
+      assertSnapshot(matching: view, as: .image(traits: .init(userInterfaceStyle: .light)))
+      assertSnapshot(matching: view, as: .image(traits: .init(userInterfaceStyle: .dark)))
+
+  SNAP-003:
+    description: Snapshots cover smallest and largest Dynamic Type sizes
+    severity: HIGH
+    rationale: >
+      Text truncation, overflow, and layout breaks caused by Dynamic Type are
+      only caught if both extremes are snapshotted.
+    fix_example: |
+      let sizes: [UIContentSizeCategory] = [.extraSmall, .accessibilityExtraExtraExtraLarge]
+      for size in sizes {
+          assertSnapshot(
+              matching: view,
+              as: .image(traits: .init(preferredContentSizeCategory: size)),
+              named: size.rawValue
+          )
+      }
+
+  SNAP-004:
+    description: Device variants include minimum iPhone SE + iPhone 15 Pro Max
+    severity: MEDIUM
+    rationale: >
+      SE represents the smallest supported screen (4.7"); Pro Max the largest (6.7").
+      Layout bugs invisible on mid-size devices appear at these extremes.
+    fix_example: |
+      let devices: [ViewImageConfig] = [.iPhoneSe, .iPhone15ProMax]
+      for device in devices {
+          assertSnapshot(matching: view, as: .image(on: device), named: "\(device)")
+      }
+
+  SNAP-005:
+    description: assertSnapshot uses .image(precision: 0.98) minimum threshold
+    severity: MEDIUM
+    rationale: >
+      Default precision (1.0) causes flaky failures from sub-pixel anti-aliasing
+      differences across Xcode versions. 0.98 eliminates noise while catching
+      real regressions.
+    bad_example: |
+      assertSnapshot(matching: view, as: .image)           // precision: 1.0 default
+    fix_example: |
+      assertSnapshot(matching: view, as: .image(precision: 0.98))
+
+  SNAP-006:
+    description: Snapshot PNG files are committed under __Snapshots__/
+    severity: HIGH
+    rationale: >
+      Without committed baselines, snapshot tests always pass on first run
+      (record mode) and provide no regression protection on CI.
+    detection: >
+      Check git for __Snapshots__/ directory adjacent to the test file.
+      If missing, snapshots have never been recorded and committed.
+    fix_guidance: >
+      Run tests once with `record: true` to generate baselines, then
+      commit the generated PNGs under __Snapshots__/.
+
+  SNAP-007:
+    description: Test double (mock/stub) injected into the component under test
+    severity: HIGH
+    rationale: >
+      Snapshot tests that trigger live network calls are non-deterministic,
+      slow, and break on network unavailability. Always inject a mock/stub.
+    architecture_specific:
+      TCA:   "Use TestStore or withDependencies to inject mock dependencies"
+      MVVM:  "Inject a mock ViewModel conforming to the ViewModel protocol"
+      VIPER: "Inject a mock Presenter into the View for snapshot tests"
+    fix_example: |
+      // MVVM example
+      let mockVM = MockProfileViewModel(name: "Jane Doe", avatar: UIImage(named: "test-avatar"))
+      let view = ProfileView(viewModel: mockVM)
+      assertSnapshot(matching: view, as: .image(precision: 0.98))

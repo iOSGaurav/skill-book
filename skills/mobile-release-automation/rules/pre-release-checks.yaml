@@ -1,0 +1,99 @@
+---
+# Pre-Release Readiness Checks
+# Run before creating the release branch.
+# Any CRITICAL failure aborts the release process.
+
+rule_set:
+  id: pre_release_checks
+  label: "Pre-Release Checks"
+  phase: 0
+  enabled: always
+
+checks:
+
+  REL-PRE-001:
+    id: REL-PRE-001
+    title: "All milestone PRs are merged"
+    severity: CRITICAL
+    rationale: >
+      Shipping a release with open milestone PRs means planned features or bug fixes
+      are excluded without a conscious decision. Every open PR must be explicitly
+      deferred to the next milestone or merged before the release branch is cut.
+    detection: "gh pr list --state open --milestone v{VERSION}"
+    fix: "Merge or defer (relabel to next milestone) all open PRs."
+
+  REL-PRE-002:
+    id: REL-PRE-002
+    title: "CI is green on the source branch"
+    severity: CRITICAL
+    rationale: >
+      Cutting a release branch from a failing source branch carries broken tests,
+      lint errors, or snapshot failures into the release — making them harder to
+      trace and fix under deadline pressure.
+    detection: "gh run list --branch main --workflow=ci.yml --limit 1 --json conclusion -q '.[0].conclusion'"
+    expected: "success"
+    fix: "Fix failing CI jobs on the source branch before cutting the release."
+
+  REL-PRE-003:
+    id: REL-PRE-003
+    title: "No open CRITICAL or HIGH bugs in the release milestone"
+    severity: HIGH
+    rationale: >
+      Known high-severity bugs assigned to this milestone indicate the feature set
+      is not complete. Ship only when all blockers are resolved or explicitly deferred.
+    detection: "gh issue list --milestone v{VERSION} --label bug --state open"
+    fix: "Fix or defer all open bug issues in the milestone."
+
+  REL-PRE-004:
+    id: REL-PRE-004
+    title: "Snapshot baselines are committed and up to date"
+    severity: HIGH
+    rationale: >
+      Uncommitted or stale snapshot PNGs cause snapshot tests to fail immediately
+      on the release branch CI run, delaying the release for a non-code reason.
+    detection: "git status --short | grep '__Snapshots__'"
+    fix: |
+      Commit updated snapshots or trigger the baseline update workflow:
+      gh workflow run update-snapshots.yml -f branch=main
+
+  REL-PRE-005:
+    id: REL-PRE-005
+    title: "Source branch has no uncommitted or untracked changes"
+    severity: HIGH
+    rationale: >
+      Uncommitted changes will be silently excluded from the release branch.
+      Either commit, stash, or discard all changes before cutting the release.
+    detection: "git status --porcelain"
+    fix: "git stash OR git commit -m 'chore: ...' before starting the release."
+
+  REL-PRE-006:
+    id: REL-PRE-006
+    title: "Source branch is main or develop — not a feature branch"
+    severity: HIGH
+    rationale: >
+      Cutting a release from a feature branch means only that branch's changes
+      are included. All other merged work on main/develop would be excluded.
+    detection: "git branch --show-current | grep -E '^(main|develop|master)$'"
+    fix: "Switch to main or develop before running the release workflow."
+
+  REL-PRE-007:
+    id: REL-PRE-007
+    title: "No orphaned release branches from a previous cycle"
+    severity: MEDIUM
+    rationale: >
+      An unmerged `release/x.y.z` branch from a previous cycle indicates an
+      incomplete prior release. It must be merged or deleted before starting a new one
+      to avoid confusion about which branch is the current release.
+    detection: "git branch -r | grep 'release/'"
+    fix: "Merge or delete the stale release branch."
+
+  REL-PRE-008:
+    id: REL-PRE-008
+    title: "No App Store submission currently in review"
+    severity: MEDIUM
+    rationale: >
+      Apple only allows one app version in review at a time. Submitting a new build
+      while another is in review requires rejecting the in-review submission first,
+      which resets the review queue.
+    fix: "Check App Store Connect — wait for the current submission to be approved or reject it."
+    detection: "Manual — check App Store Connect status."

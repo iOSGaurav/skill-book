@@ -1,0 +1,146 @@
+---
+# VIPER Module Assembly Rules
+# Responsibility: Completeness, wiring, and dependency graph correctness
+
+rule_set:
+  id: viper_module_assembly
+  name: VIPER — Module Assembly
+  description: >
+    Rules for VIPER module completeness and correct assembly. Every VIPER
+    module must have all 5 layers (V-I-P-E-R) present, wired via protocols,
+    with no circular dependencies and a single Builder/Configurator entry point.
+  enabled: always
+  layer: Assembly
+
+checks:
+
+  MOD-001:
+    description: All 5 VIPER layers present in the module directory (V + I + P + E + R)
+    severity: HIGH
+    rationale: >
+      A VIPER module missing a layer has either degenerated into a simpler
+      pattern (MVVM, MVC) or has logic incorrectly distributed. Completeness
+      should be verified before per-layer checks.
+    detection: |
+      For each directory matching a module pattern (e.g. Sources/Modules/Login/),
+      verify presence of files matching each layer's naming pattern:
+        View:        *View.swift or *ViewController.swift
+        Interactor:  *Interactor.swift
+        Presenter:   *Presenter.swift
+        Entity:      *Entity.swift or *Model.swift
+        Router:      *Router.swift or *Wireframe.swift
+        Builder:     *Builder.swift or *Configurator.swift (recommended)
+    fix_example: |
+      Login/
+        LoginViewController.swift   ← View
+        LoginInteractor.swift       ← Interactor
+        LoginPresenter.swift        ← Presenter
+        LoginEntity.swift           ← Entity
+        LoginRouter.swift           ← Router
+        LoginBuilder.swift          ← Assembly (recommended)
+
+  MOD-002:
+    description: Builder/Configurator creates layers in the correct dependency order
+    severity: HIGH
+    rationale: >
+      The dependency graph is: Interactor ← Presenter → View, Router.
+      The Builder must create dependencies before dependents, otherwise
+      protocol assignments are nil at runtime.
+    correct_order: |
+      1. Create Interactor (depends on external services only)
+      2. Create Presenter (depends on Interactor and Router)
+      3. Create Router (depends on target ViewController)
+      4. Create View/ViewController (depends on Presenter)
+      5. Wire all protocol references
+    bad_example: |
+      // ❌ Circular dependency: Presenter created before Interactor
+      let presenter = LoginPresenter()
+      let interactor = LoginInteractor()
+      presenter.interactor = interactor
+      interactor.output = presenter  // ← this is fine
+      // But if Presenter's init requires Interactor, this crashes
+    fix_example: |
+      enum LoginBuilder {
+          static func build() -> UIViewController {
+              // 1. External services (deepest dependencies first)
+              let authService = FirebaseAuthService()
+
+              // 2. Interactor
+              let interactor = LoginInteractor(authService: authService)
+
+              // 3. Router (created before Presenter so it can be passed in)
+              let router = LoginRouter()
+
+              // 4. Presenter (receives interactor + router)
+              let presenter = LoginPresenter()
+              presenter.interactor = interactor
+              presenter.router = router
+
+              // 5. View
+              let view = LoginViewController()
+              view.presenter = presenter
+              presenter.view = view
+
+              // 6. Back-references
+              interactor.output = presenter
+              router.viewController = view
+
+              return view
+          }
+      }
+
+  MOD-003:
+    description: No circular dependencies between layers
+    severity: CRITICAL
+    rationale: >
+      Circular strong references prevent deallocation and cause memory leaks.
+      The known safe pattern is: View --(strong)--> Presenter --(strong)--> Interactor.
+      All back-references (Presenter → View, Interactor → Presenter output,
+      Router → ViewController) must be weak.
+    reference_rules: |
+      STRONG references (owned):
+        View     → Presenter (strong var presenter: PresenterProtocol?)
+        Presenter → Interactor (strong var interactor: InteractorProtocol?)
+        Presenter → Router    (strong var router: RouterProtocol?)
+
+      WEAK references (back-references to break cycles):
+        Presenter → View          (weak var view: ViewProtocol?)
+        Interactor → Presenter    (weak var output: InteractorOutputProtocol?)
+        Router    → ViewController (weak var viewController: UIViewController?)
+    detection: >
+      Build the full reference graph for the module. Any cycle where all edges
+      are strong is a leak. Flag the edges that should be weak.
+
+  MOD-004:
+    description: Module entry point returns UIViewController or SwiftUI View
+    severity: MEDIUM
+    rationale: >
+      The Builder/Configurator should have a single `build()` factory method
+      returning the entry View, hiding all assembly details from the caller.
+    bad_example: |
+      // ❌ Caller assembles the module themselves
+      let vc = LoginViewController()
+      let interactor = LoginInteractor()
+      let presenter = LoginPresenter()
+      // ... 10 lines of wiring ...
+      navigationController.push(vc)
+    fix_example: |
+      // ✅ One-line usage via Builder
+      let loginVC = LoginBuilder.build()
+      navigationController?.pushViewController(loginVC, animated: true)
+
+  MOD-005:
+    description: Protocol files co-located with the module or in a Protocols/ subdirectory
+    severity: SUGGESTION
+    rationale: >
+      Scattered protocol definitions make it hard to understand module contracts.
+      Keep protocol definitions close to their module for discoverability.
+    suggested_structure: |
+      Login/
+        Protocols/
+          LoginProtocols.swift    ← all 5+ protocols in one file (small modules)
+          # or:
+          LoginViewProtocol.swift
+          LoginInteractorProtocol.swift
+          LoginPresenterProtocol.swift
+          LoginRouterProtocol.swift

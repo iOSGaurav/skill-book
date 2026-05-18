@@ -1,0 +1,656 @@
+---
+# Shared Performance Rules
+# Covers: SwiftUI rendering · Swift memory · Combine · Architecture boundaries
+# Used by: swift-tca-code-review · swift-mvvm-code-review · swift-viper-code-review
+# Version: 1.0.0
+
+rule_set:
+  id: performance
+  label: "Performance"
+  enabled: always
+  note: "Architecture-specific performance files (swiftui-performance.yaml, swiftui-bindings.yaml) complement these rules with targeted checks."
+
+# ============================================================
+# CATEGORY 1 — SwiftUI Rendering
+# ============================================================
+
+swiftui_rendering:
+
+  PERF-001:
+    id: PERF-001
+    title: "No expensive computation in View body"
+    severity: HIGH
+    description: |
+      The `body` property is called on every render pass. Any computation inside it
+      (sorting, filtering, string formatting, date calculations) runs on every frame.
+      Move pre-computation to the ViewModel / Presenter / @State / computed property
+      evaluated outside the render cycle.
+    detect:
+      - pattern: "var body: some View"
+        look_for:
+          - inline sort/filter/map on collections
+          - DateFormatter() instantiation inside body
+          - NumberFormatter() instantiation inside body
+          - heavy string interpolation in labels
+    fix: "Pre-compute in ViewModel init or a dedicated @State property."
+    bad_example: |
+      var body: some View {
+          List(items.sorted { $0.date > $1.date }) { ... }
+      }
+    good_example: |
+      // In ViewModel
+      var sortedItems: [Item] { items.sorted { $0.date > $1.date } }
+
+  PERF-002:
+    id: PERF-002
+    title: "Avoid AnyView type-erasure"
+    severity: HIGH
+    description: |
+      `AnyView` disables SwiftUI's structural diffing. The runtime cannot reconcile
+      the wrapped view tree and must destroy/recreate it on every render.
+      Use `@ViewBuilder` conditional branches or `Group` instead.
+    detect:
+      - "AnyView("
+      - ".eraseToAnyView()"
+    fix: "Replace with @ViewBuilder or Group { if ... } else { ... }."
+    bad_example: |
+      func row() -> AnyView {
+          if isLoading { return AnyView(ProgressView()) }
+          return AnyView(Text(title))
+      }
+    good_example: |
+      @ViewBuilder
+      func row() -> some View {
+          if isLoading { ProgressView() } else { Text(title) }
+      }
+
+  PERF-003:
+    id: PERF-003
+    title: "Observe only what the view needs"
+    severity: HIGH
+    description: |
+      An `@ObservedObject` / `@StateObject` that publishes many unrelated properties
+      will redraw every subscriber on any change. With `@Observable` (iOS 17+), access
+      only the properties you actually read in body. With ObservableObject, split into
+      smaller objects or use Equatable filtering.
+    detect:
+      - ObservableObject with 5+ @Published properties referenced in a single View
+      - @EnvironmentObject used where only one property is needed
+    fix: "Split into focused ViewModels, or use @Observable for fine-grained tracking."
+
+  PERF-004:
+    id: PERF-004
+    title: "Conform custom Views to Equatable for short-circuit diffing"
+    severity: LOW
+    description: |
+      When a parent redraws, SwiftUI re-evaluates every child body unless SwiftUI can
+      determine inputs haven't changed. Conforming a view's body-input struct to
+      `Equatable` and wrapping with `.equatable()` allows the engine to skip re-renders
+      when inputs are identical.
+    detect:
+      - large leaf views that receive value-type inputs but lack Equatable conformance
+    fix: "Add Equatable to the view's input model and apply .equatable() modifier."
+
+  PERF-005:
+    id: PERF-005
+    title: ".id() modifier used intentionally — forces full recreate"
+    severity: MEDIUM
+    description: |
+      Assigning a new value to `.id()` destroys the existing view and creates a fresh
+      instance (including re-running .onAppear, .task, animations). Using a frequently
+      changing value (e.g. current timestamp) as the id causes constant rebuilds.
+    detect:
+      - ".id(Date())"
+      - ".id(UUID())"
+      - ".id(dynamicValue)" where dynamicValue changes on every render
+    fix: "Only change .id() when you explicitly need a full view reset."
+
+  PERF-006:
+    id: PERF-006
+    title: "Avoid redundant overlay/background stacks"
+    severity: LOW
+    description: |
+      Deeply nested `.overlay { .overlay { ... } }` or `.background { .background { ... } }`
+      chains add layout passes. Flatten into a single `ZStack` or merge into one modifier.
+    detect:
+      - more than 2 chained .overlay() modifiers on the same view
+      - more than 2 chained .background() modifiers on the same view
+    fix: "Flatten into a ZStack or a single .overlay with a composed view."
+
+  PERF-007:
+    id: PERF-007
+    title: "Avoid using Group solely as a return wrapper"
+    severity: LOW
+    description: |
+      `Group` carries layout overhead. Using it only to satisfy `some View` return type
+      in a function with a single branch is unnecessary. Use `@ViewBuilder` instead.
+    detect:
+      - "return Group { singleView }"
+    fix: "Mark function @ViewBuilder and return directly."
+
+# ============================================================
+# CATEGORY 2 — Layout Performance
+# ============================================================
+
+layout_performance:
+
+  PERF-008:
+    id: PERF-008
+    title: "GeometryReader wraps only the view that needs size — not the screen"
+    severity: HIGH
+    description: |
+      `GeometryReader` is a greedy layout container that takes all available space.
+      Wrapping an entire screen or a parent container forces all children into fixed
+      frames, breaking flexible layout and triggering extra layout passes.
+    detect:
+      - GeometryReader as top-level body container
+      - GeometryReader wrapping NavigationStack or TabView children
+    fix: "Wrap only the specific child that needs the measured size, or use .overlay(GeometryReader) to read without affecting layout."
+
+  PERF-009:
+    id: PERF-009
+    title: "Use LazyVStack/LazyHStack for large dynamic collections"
+    severity: HIGH
+    threshold: 50
+    description: |
+      `VStack` and `HStack` render all children immediately. For collections over ~50
+      items this causes excessive memory allocation and slow initial render.
+      Use `LazyVStack`/`LazyHStack` inside a `ScrollView` or use `List`.
+    detect:
+      - VStack containing ForEach with estimated count > 50
+      - HStack containing ForEach with large arrays
+    fix: "Replace VStack/HStack with LazyVStack/LazyHStack inside ScrollView."
+
+  PERF-010:
+    id: PERF-010
+    title: "Avoid deeply nested stacks (> 5 levels)"
+    severity: MEDIUM
+    description: |
+      Each stack level adds a layout pass. Beyond 5 levels of nesting, layout resolution
+      time grows noticeably. Extract subviews into named View structs to flatten depth.
+    detect:
+      - VStack/HStack/ZStack nesting depth > 5
+    fix: "Extract inner groups into separate View structs with clear names."
+
+  PERF-011:
+    id: PERF-011
+    title: "Prefer ViewThatFits over manual GeometryReader branching"
+    severity: LOW
+    description: |
+      `ViewThatFits` (iOS 16+) performs layout proposals internally without exposing
+      a geometry proxy. Using `GeometryReader` to conditionally swap layouts adds an
+      extra layout pass and exposes frame values before layout stabilises.
+    detect:
+      - GeometryReader used to compare proxy.size and switch between layouts
+    fix: "Replace with ViewThatFits { LargeLayout(); CompactLayout() }."
+
+  PERF-012:
+    id: PERF-012
+    title: "ScrollView with pinned headers uses LazyVStack(pinnedViews:)"
+    severity: LOW
+    description: |
+      Implementing sticky headers by using `.offset` tracking inside a plain `VStack`
+      is CPU-expensive — recalculates every scroll pixel. Use
+      `LazyVStack(pinnedViews: [.sectionHeaders])` instead.
+    detect:
+      - offset-based sticky header implementations inside ScrollView
+    fix: "Use LazyVStack(pinnedViews: [.sectionHeaders]) with Section headers."
+
+# ============================================================
+# CATEGORY 3 — Swift Memory & Value Types
+# ============================================================
+
+swift_memory:
+
+  PERF-013:
+    id: PERF-013
+    title: "Large structs in hot paths — consider class or inout"
+    severity: MEDIUM
+    description: |
+      Swift copies value types on assignment. Structs with many stored properties
+      (> ~10 fields or containing large arrays) passed by value in high-frequency
+      code paths generate heap pressure. Prefer `inout` parameters or model as a
+      class with value semantics (copy-on-write).
+    detect:
+      - struct with > 10 stored properties passed by value into closures or frequently-called functions
+    fix: "Pass inout, move to class, or implement COW manually."
+
+  PERF-014:
+    id: PERF-014
+    title: "Copy-on-write — avoid triggering unnecessary copies of Array/Dictionary/String"
+    severity: MEDIUM
+    description: |
+      Swift standard collection types use COW. A copy is made when a shared reference
+      is mutated. Passing collections into closures that mutate them unexpectedly bumps
+      the reference count and forces a full copy. Use `withUnsafeMutableBufferPointer`
+      or pre-size arrays to avoid repeated reallocations in tight loops.
+    detect:
+      - Array append inside a loop that could be pre-allocated
+      - mutating collection captured in multiple concurrent closures
+    fix: "Pre-allocate with Array(repeating:count:) or reserveCapacity()."
+
+  PERF-015:
+    id: PERF-015
+    title: "Avoid dynamic dispatch in hot loops"
+    severity: LOW
+    description: |
+      Protocol-typed variables resolved via dynamic dispatch add vtable lookup overhead
+      in tight loops. Using concrete types, `some Protocol`, or `@inline(__always)` for
+      small frequently-called methods eliminates this.
+    detect:
+      - protocol-typed parameters in loops with > 10k expected iterations
+    fix: "Use concrete types or generics <T: Protocol> to enable static dispatch."
+
+  PERF-016:
+    id: PERF-016
+    title: "NSCache for expensive computed objects"
+    severity: MEDIUM
+    description: |
+      Repeatedly constructing expensive objects (formatters, renderers, attributed strings)
+      in render loops or cell configurations causes GC pressure. Cache with NSCache so
+      the system can evict under memory pressure automatically.
+    detect:
+      - DateFormatter() / NumberFormatter() / AttributedString() constructed inside list cell bodies
+    fix: "Cache formatters as static/class-level properties or in a dedicated cache."
+
+  PERF-017:
+    id: PERF-017
+    title: "Bound in-memory image cache size"
+    severity: HIGH
+    description: |
+      Storing decoded `UIImage` / `CGImage` objects in a plain `[URL: UIImage]` dictionary
+      has no eviction policy — memory grows unbounded. Use `NSCache` with a cost limit
+      or a dedicated caching library.
+    detect:
+      - "var cache: [URL: UIImage]"
+      - "var cache: [String: UIImage]"
+      - Dictionary used as image cache without eviction
+    fix: "Replace with NSCache<NSURL, UIImage> and set countLimit/totalCostLimit."
+
+# ============================================================
+# CATEGORY 4 — Concurrency
+# ============================================================
+
+concurrency:
+
+  PERF-018:
+    id: PERF-018
+    title: "No blocking main thread"
+    severity: CRITICAL
+    description: |
+      Blocking the main thread freezes the UI. Any call to `Thread.sleep()`,
+      `DispatchSemaphore.wait()`, synchronous file I/O, or synchronous network calls
+      on the main actor will trigger a watchdog kill on device.
+    detect:
+      - "Thread.sleep"
+      - "DispatchSemaphore.wait"
+      - "semaphore.wait()"
+      - "URLSession.shared.data(for:)" called without async/await on @MainActor
+    fix: "Move all blocking operations to a background Task or detached task."
+
+  PERF-019:
+    id: PERF-019
+    title: "CPU-bound work runs off the main actor"
+    severity: HIGH
+    description: |
+      Image processing, JSON parsing of large payloads, encryption, or compression
+      should run on a background executor. Annotating such functions with `@MainActor`
+      or running them in a `Task { @MainActor in ... }` starves the UI.
+    detect:
+      - @MainActor on functions doing image resizing, heavy JSON decoding, or crypto
+    fix: "Remove @MainActor, run in Task.detached(priority: .utility) { ... }."
+
+  PERF-020:
+    id: PERF-020
+    title: "Use async let for concurrent independent work"
+    severity: MEDIUM
+    description: |
+      Sequential `await` calls that are not data-dependent execute serially.
+      `async let` runs them concurrently within structured concurrency, reducing
+      total wall time to max(individual durations).
+    detect:
+      - two or more sequential `let x = await` calls where x and y are independent
+    fix: |
+      async let a = fetchA()
+      async let b = fetchB()
+      let (resultA, resultB) = await (a, b)
+    bad_example: |
+      let user = await fetchUser()
+      let posts = await fetchPosts()   // waits for user first — unnecessary
+    good_example: |
+      async let user = fetchUser()
+      async let posts = fetchPosts()
+      let (u, p) = await (user, posts)
+
+  PERF-021:
+    id: PERF-021
+    title: "Task priority matches work importance"
+    severity: LOW
+    description: |
+      All background Tasks created with default priority compete equally for system
+      threads. User-initiated work (responding to a tap) warrants `.userInitiated`.
+      Background prefetch warrants `.background` or `.utility` to avoid starving UI.
+    detect:
+      - Task { } without explicit priority for non-UI-triggered background work
+    fix: "Set Task(priority: .utility) for background work, .userInitiated for tap responses."
+
+  PERF-022:
+    id: PERF-022
+    title: "Paginate network-backed collections — never fetch unbounded"
+    severity: HIGH
+    description: |
+      Fetching an unbounded collection in a single request exhausts memory for large
+      datasets and blocks decoding on the main actor. Use cursor/offset pagination,
+      limit query parameters, or streaming.
+    detect:
+      - Firestore/REST fetch without .limit()
+      - Fetching all rows from a database table
+    fix: "Apply .limit(pageSize) and load next page on scroll. See FB-001 in firebase.yaml."
+
+# ============================================================
+# CATEGORY 5 — Combine Performance
+# ============================================================
+
+combine_performance:
+
+  PERF-023:
+    id: PERF-023
+    title: ".receive(on:) at final subscriber only — not mid-chain"
+    severity: HIGH
+    description: |
+      Calling `.receive(on: DispatchQueue.main)` mid-chain causes a context switch
+      for every emitted value from that point, even for intermediate operators that
+      don't touch the UI. Switch to the main queue only at the point of UI update.
+    detect:
+      - .receive(on: DispatchQueue.main) followed by non-UI operators (.map, .filter, .flatMap)
+    fix: "Move .receive(on: DispatchQueue.main) immediately before .sink or .assign."
+
+  PERF-024:
+    id: PERF-024
+    title: "debounce/throttle on high-frequency user input publishers"
+    severity: HIGH
+    description: |
+      Search text fields, sliders, and scroll offset publishers can emit hundreds of
+      values per second. Chaining network calls or heavy computations directly off
+      these publishers without `debounce` or `throttle` causes request floods.
+    detect:
+      - $searchText.flatMap { fetchResults($0) } without preceding debounce
+      - slider value publishers driving network/DB calls without throttle
+    fix: ".debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)"
+
+  PERF-025:
+    id: PERF-025
+    title: "share() to multicast expensive upstream — avoid duplicate subscriptions"
+    severity: MEDIUM
+    description: |
+      Multiple subscribers to the same cold publisher (network request, file read)
+      each trigger the upstream work independently. Use `.share()` or
+      `.multicast(subject:).autoconnect()` so the work executes once.
+    detect:
+      - same publisher subscribed from two or more places without .share()
+    fix: "let shared = expensivePublisher.share()"
+
+  PERF-026:
+    id: PERF-026
+    title: "flatMap with bounded maxPublishers on high-frequency sources"
+    severity: HIGH
+    description: |
+      `flatMap` with default `.unlimited` maxPublishers creates a new inner publisher
+      for every upstream emission. On a high-frequency source this causes unbounded
+      inner subscription growth and memory pressure. Use `flatMap(maxPublishers: .max(1))`
+      (latest-only, dropping in-flight) or `switchToLatest()`.
+    detect:
+      - .flatMap { } on publishers emitting at > ~10Hz
+      - .flatMap without maxPublishers on search/scroll publishers
+    fix: "Use .flatMap(maxPublishers: .max(1)) or .map { }.switchToLatest()."
+
+  PERF-027:
+    id: PERF-027
+    title: ".collect() must have a time or count bound"
+    severity: MEDIUM
+    description: |
+      `.collect()` without arguments buffers every upstream value until completion.
+      For long-lived or infinite publishers this causes unbounded memory growth.
+    detect:
+      - ".collect()" on a publisher that does not complete (PassthroughSubject, $property)
+    fix: "Use .collect(.byTime(scheduler, interval)) or .collect(.byTimeOrCount(s, i, n))."
+
+# ============================================================
+# CATEGORY 6 — Architecture Boundary Performance
+# ============================================================
+
+architecture_performance:
+
+  PERF-028:
+    id: PERF-028
+    title: "Data transformation lives outside the View layer"
+    severity: HIGH
+    description: |
+      Transforming domain models into display strings (date formatting, currency
+      formatting, pluralization) inside `View.body` runs on every render. This work
+      belongs in the ViewModel, Presenter, or Reducer's reduce function.
+    detect:
+      - DateFormatter().string(from:) inside body
+      - String(format:) for display text inside body
+      - ISO8601DateFormatter inside cell views
+    fix: "Pre-format in ViewModel/Presenter. Store as String @Published / let property."
+
+  PERF-029:
+    id: PERF-029
+    title: "DTO→Domain mapping happens at the network boundary only"
+    severity: MEDIUM
+    description: |
+      Mapping network responses to domain models on every list render (e.g. in a
+      `computed var` called from body) wastes CPU. Map once when data arrives at
+      the repository/use-case boundary.
+    detect:
+      - Codable decoding or DTO mapping called inside View computed properties
+      - JSONDecoder().decode() in ViewModel computed var without caching
+    fix: "Map at repository/use-case layer. Store domain model, not raw DTO, in state."
+
+  PERF-030:
+    id: PERF-030
+    title: "Sorting and filtering pre-computed in ViewModel/Reducer state"
+    severity: HIGH
+    description: |
+      `items.filter { }.sorted { }` in a computed property accessed from `body` reruns
+      on every render pass. Pre-compute and store as a dedicated `@Published` var or
+      `State` property updated in response to data changes.
+    detect:
+      - ".filter { }.sorted { }" in View body or View computed var
+      - Array operations on @EnvironmentObject inside body
+    fix: "Expose sortedFilteredItems: [Item] from ViewModel, updated via Combine/Effect."
+
+  PERF-031:
+    id: PERF-031
+    title: "Effects/Use Cases cache results — avoid redundant network calls"
+    severity: MEDIUM
+    description: |
+      Fetching the same resource on every View appearance (via `.onAppear` or `.task`)
+      without checking an in-memory or persistent cache causes avoidable latency and
+      data cost. Cache with a TTL or skip fetch when state is already populated.
+    detect:
+      - .task / .onAppear always triggering network fetch regardless of existing state
+      - fetchUser() called on every navigation push without cache check
+    fix: "Guard on state: if !state.items.isEmpty { return } before issuing effect."
+
+  PERF-032:
+    id: PERF-032
+    title: "Interactor/Use-Case results delivered on background — ViewModel publishes on main"
+    severity: HIGH
+    description: |
+      Decoding large payloads and delivering them directly on the main actor blocks UI.
+      Interactors and Use Cases should do work off the main thread and only marshal
+      the final result to the main actor/DispatchQueue for state update.
+    detect:
+      - Interactor performing JSON decode then calling presenterOutput on DispatchQueue.main inline
+      - Use-case returning decoded array before switching to main
+    fix: "Decode on background queue; switch to main only to publish the final result."
+
+  PERF-033:
+    id: PERF-033
+    title: "Avoid N+1 data fetching patterns"
+    severity: HIGH
+    description: |
+      Fetching a list of items and then fetching each item's details individually in a
+      loop is an N+1 pattern — O(N) network calls instead of one batch request.
+    detect:
+      - ForEach / .forEach calling a fetch function per item
+      - flatMap on collection triggering individual network requests per element
+    fix: "Batch-fetch with IDs array or include nested data in the initial query."
+
+# ============================================================
+# CATEGORY 7 — Collections and Data
+# ============================================================
+
+collections_and_data:
+
+  PERF-034:
+    id: PERF-034
+    title: "List/ForEach uses stable, unique identifiers"
+    severity: HIGH
+    description: |
+      Unstable or non-unique IDs (index-based `\.self` on value types, UUID() generated
+      per render) force SwiftUI to destroy and recreate every cell on each update instead
+      of diffing. This causes visible flicker and wasted rendering work.
+    detect:
+      - "ForEach(items, id: \\.self)" where items are Strings or Ints without Identifiable
+      - "ForEach(0..<items.count)" without stable id keypath
+    fix: "Conform model to Identifiable with a stable UUID or database primary key."
+
+  PERF-035:
+    id: PERF-035
+    title: "List row views are lightweight — no async work per row"
+    severity: MEDIUM
+    description: |
+      Initiating network requests, database reads, or spawning Tasks directly inside
+      a `List` row body means N concurrent operations when a large list loads.
+      Prefetch or virtualise instead.
+    detect:
+      - .task { await loadThumbnail() } on every List row without throttling
+      - Network call triggered in onAppear per cell
+    fix: "Prefetch in batches from ViewModel. Provide placeholder state until loaded."
+
+  PERF-036:
+    id: PERF-036
+    title: "Infinite scroll / pagination for large backend collections"
+    severity: HIGH
+    description: |
+      Loading all remote records upfront grows memory linearly and increases initial
+      load time. Implement cursor-based or offset pagination triggered at list end.
+    detect:
+      - fetchAll() / getDocuments() without limit
+      - Single request returning > 100 items displayed in a List
+    fix: "Use .limit(20) + cursor, trigger next page load when user nears list end."
+
+  PERF-037:
+    id: PERF-037
+    title: "Avoid Array(set) or Set→Array conversion in hot render paths"
+    severity: LOW
+    description: |
+      Converting between Set and Array is O(N) and copies elements. Inside render paths
+      this runs on every draw. Cache the converted collection in the ViewModel.
+    detect:
+      - "Array(someSet)" or "someSet.sorted()" inside View body or computed View var
+    fix: "Store the pre-converted/sorted array in ViewModel state."
+
+# ============================================================
+# CATEGORY 8 — Images and Assets
+# ============================================================
+
+images_and_assets:
+
+  PERF-038:
+    id: PERF-038
+    title: "Thumbnail images are downsampled — not full-resolution"
+    severity: HIGH
+    description: |
+      Displaying a 4K image in a 44×44 thumbnail decodes the full pixel buffer (~48 MB)
+      then scales in the compositor — wasting memory and GPU time. Downsample at load
+      time using `ImageIO` or request thumbnail-sized variants from the CDN.
+    detect:
+      - large remote images displayed in cells with frame ≤ 100pt
+      - AsyncImage without .scaledToFill and explicit small frame
+    fix: "Request appropriately-sized image variant (e.g. ?width=88 query param) or use ImageIO CGImageSourceCreateThumbnailAtIndex."
+
+  PERF-039:
+    id: PERF-039
+    title: "AsyncImage includes placeholder and failure states"
+    severity: MEDIUM
+    description: |
+      Without a placeholder, `AsyncImage` shows nothing until load completes — causing
+      layout jumps. Without an error state, a failed load renders a blank space silently.
+    detect:
+      - "AsyncImage(url:)" without phase closure
+    fix: |
+      AsyncImage(url: url) { phase in
+          switch phase {
+          case .empty:    ProgressView()
+          case .success(let img): img.resizable()
+          case .failure:  Image(systemName: "photo")
+          @unknown default: EmptyView()
+          }
+      }
+
+  PERF-040:
+    id: PERF-040
+    title: "SF Symbols preferred over bundled raster images for icons"
+    severity: LOW
+    description: |
+      SF Symbols scale to any size, weight, and color without a pixel buffer. Using
+      raster PNG assets for icons that exist in SF Symbols wastes bundle size and
+      loses free Dynamic Type / accessibility scaling.
+    detect:
+      - Image("icon-*") usage where an SF Symbol equivalent exists
+    fix: "Replace with Image(systemName: \"...\")."
+
+# ============================================================
+# CATEGORY 9 — Instrumentation
+# ============================================================
+
+instrumentation:
+
+  PERF-041:
+    id: PERF-041
+    title: "os_signpost marks critical performance intervals"
+    severity: SUGGESTION
+    description: |
+      Critical user-facing operations (list load, image decode, effect execution)
+      should be bracketed with `os_signpost(.begin/.end)` so they appear in Instruments
+      Time Profiler and can be traced in production builds.
+    detect:
+      - absence of os_signpost in functions documented as performance-sensitive
+    fix: |
+      import os.signpost
+      let log = OSLog(subsystem: "com.app", category: .pointsOfInterest)
+      os_signpost(.begin, log: log, name: "FetchItems")
+      defer { os_signpost(.end, log: log, name: "FetchItems") }
+
+  PERF-042:
+    id: PERF-042
+    title: "No print() / NSLog() in hot paths — use os.log"
+    severity: MEDIUM
+    description: |
+      `print()` and `NSLog()` are synchronous and write to stdout. In hot render loops
+      or high-frequency Combine pipelines they add measurable latency. Replace with
+      `os.Logger` which is async, zero-cost when disabled, and visible in Console.app.
+    detect:
+      - "print(" inside View body, ForEach, or Combine operators
+      - "NSLog(" in performance-sensitive code paths
+    fix: |
+      import os
+      private let logger = Logger(subsystem: "com.app", category: "Feed")
+      logger.debug("items loaded: \(count)")
+
+  PERF-043:
+    id: PERF-043
+    title: "Avoid force-layout / setNeedsLayout in UIKit bridging"
+    severity: MEDIUM
+    description: |
+      When bridging UIKit via `UIViewRepresentable` or `UIViewControllerRepresentable`,
+      calling `setNeedsLayout()` / `layoutIfNeeded()` from SwiftUI update cycles causes
+      synchronous layout passes on the main thread, defeating SwiftUI's deferred layout.
+    detect:
+      - layoutIfNeeded() inside updateUIView or updateUIViewController
+      - setNeedsLayout() triggered from @Published change observer in representable
+    fix: "Let UIKit handle its own layout cycle. Only call setNeedsLayout when a frame change is unavoidable."

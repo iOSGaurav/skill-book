@@ -1,0 +1,114 @@
+---
+# Swift TCA Code Review — Skill Configuration
+# Architecture: The Composable Architecture (TCA)
+# Version: 2.0.0
+# Rules are defined in separate files — edit them independently.
+
+skill:
+  name: swift-tca-code-review
+  version: "2.0.0"
+  architecture: TCA
+
+context_detection:
+  priority_order:
+    - path: "CLAUDE.md"
+      note: "Highest priority — always overrides skill defaults"
+    - path: ".swiftlint.yml"
+    - path: "Package.swift"
+    - path: "Podfile.lock"
+    - path: ".github/workflows/*.yml"
+
+  tca_version_patterns:
+    v0x:     "Reducer<State, Action, Environment>"
+    v1x:     "struct .+: ReducerProtocol"
+    v1_7+:   "@Reducer struct"
+    default: "v1x"
+
+  feature_flags:
+    firebase: ["FirebaseFirestore", "FirebaseAuth", "FirebaseStorage"]
+    snapshot: ["SnapshotTesting"]
+
+# ============================================================
+# RULE FILES
+# Edit individual files to change checks for that dimension.
+# ============================================================
+
+dimensions:
+
+  tca_architecture:
+    rules_file: "rules/tca-architecture.yaml"
+    enabled: always
+
+  swiftui_performance:
+    rules_file: "rules/swiftui-performance.yaml"
+    enabled: always
+
+  accessibility:
+    rules_file: "rules/accessibility.yaml"
+    enabled: always
+
+  firebase:
+    rules_file: "rules/firebase.yaml"
+    enabled: when_firebase_imported
+
+  snapshot_testing:
+    rules_file: "rules/snapshot-testing.yaml"
+    enabled: when_snapshot_imported
+
+  maintainability:
+    rules_file: "rules/maintainability.yaml"
+    enabled: always
+
+  security:
+    rules_file: "rules/security.yaml"
+    enabled: always
+
+  combine:
+    rules_file: "rules/combine.yaml"
+    enabled: when_combine_imported
+
+  swiftui_common:
+    rules_file: "rules/swiftui.yaml"
+    enabled: always
+
+  performance:
+    rules_file: "rules/performance.yaml"
+    enabled: always
+
+  github_pr_hygiene:
+    rules_file: "rules/github-pr-hygiene.yaml"
+    enabled: always
+
+# ============================================================
+# SEVERITY & MERGE SIGNAL
+# ============================================================
+
+severity_levels:
+  CRITICAL: { action: "Block merge",       emoji: "🔴" }
+  HIGH:     { action: "Fix before merge",   emoji: "🟠" }
+  MEDIUM:   { action: "Fix if time allows", emoji: "🟡" }
+  LOW:      { action: "Fix if easy",        emoji: "🔵" }
+  SUGGESTION: { action: "Consider later",   emoji: "💡" }
+
+merge_signal:
+  not_ready:  { condition: "any CRITICAL OR 3+ HIGH",   label: "🔴 Not ready to merge" }
+  needs_work: { condition: "1–2 HIGH OR 4+ MEDIUM",     label: "🟡 Minor fixes required" }
+  ready:      { condition: "only LOW or SUGGESTION",    label: "🟢 Ready to merge" }
+
+# ============================================================
+# GUARDRAILS
+# ============================================================
+
+guardrails:
+  - "Never modify source files"
+  - "Never delete or rename files"
+  - "Never run destructive git commands"
+  - "Never update snapshot baselines — recommend the command; do not run it"
+  - "Ask before expanding scope beyond original input"
+  - "CLAUDE.md overrides all defaults"
+
+fallback:
+  no_swift_files:       "No Swift files detected. Please provide a file path, PR number, or directory."
+  tca_version_unknown:  "TCA 1.x rules applied (assumed). Noted in output."
+  file_unreadable:      "[SKIPPED: File unreadable — <path>]"
+  unverifiable_finding: "[UNVERIFIABLE — needs runtime test]"

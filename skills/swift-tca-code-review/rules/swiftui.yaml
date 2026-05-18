@@ -1,0 +1,1202 @@
+---
+# SwiftUI Common Rules
+# Shared across all architecture skills (TCA, MVVM, VIPER)
+# Architecture-agnostic — applies whenever SwiftUI is imported
+# These rules complement architecture-specific SwiftUI files (swiftui-performance.yaml, swiftui-bindings.yaml)
+
+rule_set:
+  id: swiftui
+  name: SwiftUI Common
+  description: >
+    Architecture-agnostic SwiftUI correctness, performance, and design rules.
+    Covers state/data-flow property wrapper selection, layout, view composition,
+    navigation, lists, lifecycle, view identity, images, gestures, previews,
+    and modern SwiftUI APIs.
+  enabled: when_swiftui_imported
+  feature_flags: [SwiftUI]
+  minimum_ios: "15.0"
+  reference: https://developer.apple.com/documentation/swiftui
+
+  categories:
+    - state_and_data_flow    # SWIFTUI-001–007
+    - layout                 # SWIFTUI-008–013
+    - view_composition       # SWIFTUI-014–018
+    - navigation             # SWIFTUI-019–022
+    - lists_and_collections  # SWIFTUI-023–026
+    - lifecycle_and_tasks    # SWIFTUI-027–030
+    - view_identity          # SWIFTUI-031–033
+    - images_and_media       # SWIFTUI-034–036
+    - gestures               # SWIFTUI-037–039
+    - previews               # SWIFTUI-040–041
+    - modern_apis            # SWIFTUI-042–046
+    - colors_and_assets      # SWIFTUI-047–048
+
+# ============================================================
+# STATE & DATA FLOW
+# ============================================================
+
+checks:
+
+  SWIFTUI-001:
+    description: "@State used only for local, view-owned transient state"
+    severity: HIGH
+    category: state_and_data_flow
+    rationale: >
+      @State is owned exclusively by the View. It is not sharable, not injectable,
+      and not testable. Using it for business data or state that needs to outlive
+      the view violates the single-source-of-truth principle.
+    guidance: |
+      @State is correct for:
+        - isShowingSheet, isExpanded, selectedTab (pure UI toggles)
+        - animationProgress, dragOffset (transient interaction state)
+
+      @State is WRONG for:
+        - User data, fetched results, domain objects
+        - State shared between views (use @Binding or ViewModel)
+        - State that must survive view re-creation
+    bad_example: |
+      struct OrderListView: View {
+          @State var orders: [Order] = []     // ❌ domain data in @State
+          @State var currentUser: User?       // ❌ cross-view state in @State
+
+          var body: some View { ... }
+      }
+    fix_example: |
+      struct OrderListView: View {
+          @State private var isFilterSheetPresented = false  // ✅ pure UI toggle
+
+          // Domain data lives in ViewModel / Store
+          @ObservedObject var viewModel: OrderListViewModel
+      }
+
+  SWIFTUI-002:
+    description: "@Binding used for two-way child ↔ parent sync; let for read-only passed values"
+    severity: HIGH
+    category: state_and_data_flow
+    rationale: >
+      @Binding creates a two-way reference to a parent's @State or @Published property.
+      Using @Binding when the child only reads the value is unnecessary overhead
+      and misleads readers into thinking the child can mutate it.
+    guidance: |
+      @Binding → child needs to READ and WRITE the value back to parent
+      let       → child only READS the value (no mutation needed)
+    bad_example: |
+      struct UserAvatarView: View {
+          @Binding var username: String   // ❌ never mutated — @Binding is unnecessary
+          var body: some View { Text(username) }
+      }
+    fix_example: |
+      struct UserAvatarView: View {
+          let username: String            // ✅ read-only → plain let
+          var body: some View { Text(username) }
+      }
+
+      struct EditNameView: View {
+          @Binding var username: String   // ✅ two-way — child edits, parent sees update
+          var body: some View { TextField("Name", text: $username) }
+      }
+
+  SWIFTUI-003:
+    description: "@Environment used for app-wide values; avoid passing them via initializers"
+    severity: MEDIUM
+    category: state_and_data_flow
+    rationale: >
+      Values like `colorScheme`, `locale`, `dismiss`, `openURL`, and custom
+      EnvironmentKey values are designed to propagate through the view hierarchy
+      via the environment. Passing them manually through initializers creates
+      unnecessary coupling between views.
+    guidance: |
+      Read from @Environment when:
+        - The value is injected by the system (colorScheme, locale, sizeCategory)
+        - The value is injected by a parent via .environment(_:_:)
+        - Using built-in actions: dismiss, openURL, requestReview
+
+      Pass via init when:
+        - The value is specific to the calling context (not environment-wide)
+    fix_example: |
+      struct ThemeAwareCard: View {
+          @Environment(\.colorScheme) var colorScheme   // ✅ from environment
+          @Environment(\.dismiss) var dismiss           // ✅ action from environment
+
+          var body: some View {
+              RoundedRectangle(cornerRadius: 12)
+                  .fill(colorScheme == .dark ? Color.gray : Color.white)
+          }
+      }
+
+  SWIFTUI-004:
+    description: "Custom EnvironmentKey defined for app-specific environment values"
+    severity: LOW
+    category: state_and_data_flow
+    rationale: >
+      Passing app-wide values (theme, feature flags, analytics) through every
+      view initializer creates long parameter chains. Custom EnvironmentKey
+      values let you propagate them cleanly without prop-drilling.
+    fix_example: |
+      // Define key
+      private struct AnalyticsClientKey: EnvironmentKey {
+          static let defaultValue = AnalyticsClient.noop
+      }
+
+      extension EnvironmentValues {
+          var analyticsClient: AnalyticsClient {
+              get { self[AnalyticsClientKey.self] }
+              set { self[AnalyticsClientKey.self] = newValue }
+          }
+      }
+
+      // Inject at root
+      ContentView()
+          .environment(\.analyticsClient, FirebaseAnalyticsClient())
+
+      // Read anywhere in the tree
+      @Environment(\.analyticsClient) var analytics
+
+  SWIFTUI-005:
+    description: "Derived/computed values not stored as @State — compute from existing state"
+    severity: MEDIUM
+    category: state_and_data_flow
+    rationale: >
+      Storing a derived value as @State creates two sources of truth that can
+      diverge. Computed values should be derived inline or in the ViewModel,
+      not stored as separate state.
+    bad_example: |
+      struct CartView: View {
+          @State var items: [CartItem]
+          @State var totalPrice: Double   // ❌ derived from items — two sources of truth
+
+          func addItem(_ item: CartItem) {
+              items.append(item)
+              totalPrice += item.price    // ❌ must remember to keep in sync
+          }
+      }
+    fix_example: |
+      struct CartView: View {
+          @State private var items: [CartItem] = []
+
+          var totalPrice: Double {        // ✅ computed — always in sync
+              items.reduce(0) { $0 + $1.price }
+          }
+      }
+
+  SWIFTUI-006:
+    description: "@AppStorage and @SceneStorage used for appropriate persistence scopes"
+    severity: LOW
+    category: state_and_data_flow
+    rationale: >
+      @AppStorage wraps UserDefaults — use it for lightweight user preferences
+      that persist across launches (theme, language, onboarding flag).
+      @SceneStorage persists per scene for state restoration (scroll position, draft text).
+      Do not use either for sensitive data (use Keychain) or large data (use file/CoreData).
+    guidance: |
+      @AppStorage   → user preferences, feature flags, small settings
+      @SceneStorage → UI restoration state (draft, scroll, selected item)
+      Keychain      → tokens, passwords, PII
+      CoreData/File → large or structured data
+    bad_example: |
+      @AppStorage("auth_token") var authToken: String = ""  // ❌ sensitive — use Keychain
+      @AppStorage("all_orders") var ordersJSON: String = "" // ❌ large data — use file/CoreData
+    fix_example: |
+      @AppStorage("preferred_theme") var preferredTheme: String = "system"  // ✅
+      @SceneStorage("draft_message") var draftMessage: String = ""          // ✅
+
+  SWIFTUI-007:
+    description: "PreferenceKey used for child-to-parent communication — not NotificationCenter"
+    severity: MEDIUM
+    category: state_and_data_flow
+    rationale: >
+      When a child view needs to report a value to an ancestor (e.g. a scroll
+      offset, a measured size, a badge count), PreferenceKey is the SwiftUI-native
+      mechanism. NotificationCenter bypasses the view hierarchy and creates
+      global coupling that is hard to test and reason about.
+    bad_example: |
+      // ❌ Child posts notification; parent listens globally
+      struct HeaderView: View {
+          var body: some View {
+              Text("Title")
+                  .onAppear { NotificationCenter.default.post(name: .headerAppeared, object: nil) }
+          }
+      }
+    fix_example: |
+      // ✅ PreferenceKey
+      struct HeaderHeightKey: PreferenceKey {
+          static var defaultValue: CGFloat = 0
+          static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+              value = max(value, nextValue())
+          }
+      }
+
+      struct HeaderView: View {
+          var body: some View {
+              Text("Title")
+                  .background(GeometryReader { geo in
+                      Color.clear.preference(key: HeaderHeightKey.self, value: geo.size.height)
+                  })
+          }
+      }
+
+      struct ParentView: View {
+          @State private var headerHeight: CGFloat = 0
+          var body: some View {
+              VStack { HeaderView() }
+                  .onPreferenceChange(HeaderHeightKey.self) { headerHeight = $0 }
+          }
+      }
+
+# ============================================================
+# LAYOUT
+# ============================================================
+
+  SWIFTUI-008:
+    description: "GeometryReader used sparingly — it expands to fill all available space"
+    severity: HIGH
+    category: layout
+    rationale: >
+      GeometryReader always expands to fill its parent's offered space (greedy layout).
+      Wrapping a small view in GeometryReader causes it to expand unexpectedly.
+      Use it only when you genuinely need the parent geometry, and keep it as
+      a background/overlay rather than the primary layout container.
+    bad_example: |
+      struct CardView: View {
+          var body: some View {
+              GeometryReader { geo in   // ❌ card now fills all available space
+                  RoundedRectangle(cornerRadius: 12)
+                      .frame(width: geo.size.width * 0.9)
+              }
+          }
+      }
+    fix_example: |
+      struct CardView: View {
+          var body: some View {
+              RoundedRectangle(cornerRadius: 12)
+                  .background(
+                      GeometryReader { geo in   // ✅ geometry measured in background
+                          Color.clear
+                              .preference(key: CardWidthKey.self, value: geo.size.width)
+                      }
+                  )
+          }
+      }
+
+  SWIFTUI-009:
+    description: "ViewThatFits used for adaptive layouts instead of manual size checks"
+    severity: LOW
+    category: layout
+    rationale: >
+      Manually checking `horizontalSizeClass` or `geometry.size.width` to
+      switch layouts is brittle and doesn't account for Dynamic Type, split-screen,
+      or stage manager. `ViewThatFits` tries each view in order and picks the
+      first that fits — simpler and more adaptive.
+    ios_minimum: "16.0"
+    bad_example: |
+      Group {
+          if horizontalSizeClass == .compact {
+              CompactToolbar()
+          } else {
+              ExpandedToolbar()
+          }
+      }
+    fix_example: |
+      ViewThatFits {
+          ExpandedToolbar()   // tried first; used if it fits
+          CompactToolbar()    // fallback if ExpandedToolbar overflows
+      }
+
+  SWIFTUI-010:
+    description: ".frame(maxWidth: .infinity)" preferred over GeometryReader for full-width views"
+    severity: MEDIUM
+    category: layout
+    rationale: >
+      A common misuse of GeometryReader is reading the width to set a child's
+      frame to full-width. `.frame(maxWidth: .infinity)` achieves the same result
+      without the greedy-layout side effects of GeometryReader.
+    bad_example: |
+      GeometryReader { geo in
+          Button("Submit") { ... }
+              .frame(width: geo.size.width)   // ❌ GeometryReader just for full-width
+      }
+    fix_example: |
+      Button("Submit") { ... }
+          .frame(maxWidth: .infinity)         // ✅ clean, no GeometryReader needed
+
+  SWIFTUI-011:
+    description: "Layout priority set with .layoutPriority() for views that must not be clipped"
+    severity: LOW
+    category: layout
+    rationale: >
+      When an HStack or VStack runs out of space, SwiftUI squishes views equally.
+      `.layoutPriority(1)` tells SwiftUI to give a view space before others,
+      preventing primary content (text labels) from being truncated by secondary content.
+    fix_example: |
+      HStack {
+          Text(product.name)
+              .layoutPriority(1)    // ✅ name gets space first
+          Spacer()
+          Text(product.price)       // price shrinks if needed
+      }
+
+  SWIFTUI-012:
+    description: "Spacer() used with minLength when zero-width spacer causes unexpected collapse"
+    severity: LOW
+    category: layout
+    rationale: >
+      `Spacer()` collapses to zero when there is no extra space, which can
+      cause adjacent views to merge. `Spacer(minLength:)` guarantees a minimum gap.
+    fix_example: |
+      HStack {
+          Image(systemName: "star")
+          Spacer(minLength: 8)    // ✅ guaranteed gap even in tight layouts
+          Text(label)
+      }
+
+  SWIFTUI-013:
+    description: "Grid used for tabular layouts instead of nested HStack/VStack"
+    severity: LOW
+    category: layout
+    ios_minimum: "16.0"
+    rationale: >
+      Nested HStack/VStack for tabular data requires manual column-width
+      alignment (usually via PreferenceKey). Grid handles column alignment
+      automatically and is more readable.
+    bad_example: |
+      VStack(alignment: .leading) {
+          HStack { Text("Name").frame(width: 100, alignment: .leading); Text(user.name) }
+          HStack { Text("Email").frame(width: 100, alignment: .leading); Text(user.email) }
+      }
+    fix_example: |
+      Grid(alignment: .leading) {
+          GridRow { Text("Name");  Text(user.name) }
+          GridRow { Text("Email"); Text(user.email) }
+      }
+
+# ============================================================
+# VIEW COMPOSITION
+# ============================================================
+
+  SWIFTUI-014:
+    description: "Views extracted into subviews when body exceeds ~20 lines or has 3+ levels of nesting"
+    severity: MEDIUM
+    category: view_composition
+    rationale: >
+      Long, deeply-nested bodies are hard to read and maintain. SwiftUI's
+      lightweight struct cost means extraction into subviews has no runtime
+      overhead. Extracted views are also independently previewable and testable.
+    guidance: >
+      Extract when: body > 20 lines, nesting > 3 levels deep, or a subtree
+      has a clear single responsibility (e.g. a header, a row, a badge).
+    bad_example: |
+      var body: some View {
+          VStack {
+              HStack {
+                  VStack(alignment: .leading) {
+                      HStack {
+                          Image(systemName: icon)
+                          Text(title).font(.headline)
+                      }
+                      Text(subtitle).font(.caption).foregroundStyle(.secondary)
+                  }
+                  Spacer()
+                  // ... 15 more lines
+              }
+          }
+      }
+    fix_example: |
+      var body: some View {
+          VStack {
+              TitleRow(icon: icon, title: title, subtitle: subtitle)
+              ActionButtons(actions: actions)
+          }
+      }
+
+      private struct TitleRow: View { ... }   // ✅ independently previewable
+      private struct ActionButtons: View { ... }
+
+  SWIFTUI-015:
+    description: "Custom ViewModifier used for reusable styling — not long modifier chains duplicated across views"
+    severity: MEDIUM
+    category: view_composition
+    rationale: >
+      Repeating the same chain of 5+ modifiers across multiple views creates
+      maintenance burden. A custom ViewModifier centralises the style and
+      allows it to evolve in one place.
+    bad_example: |
+      // ❌ Same 5-modifier chain duplicated across 10 views
+      Text("Primary")
+          .font(.headline)
+          .foregroundStyle(.white)
+          .padding(.horizontal, 16)
+          .padding(.vertical, 8)
+          .background(Color.accentColor)
+          .clipShape(Capsule())
+    fix_example: |
+      struct PrimaryButtonStyle: ViewModifier {
+          func body(content: Content) -> some View {
+              content
+                  .font(.headline)
+                  .foregroundStyle(.white)
+                  .padding(.horizontal, 16)
+                  .padding(.vertical, 8)
+                  .background(Color.accentColor)
+                  .clipShape(Capsule())
+          }
+      }
+
+      extension View {
+          func primaryButtonStyle() -> some View {
+              modifier(PrimaryButtonStyle())
+          }
+      }
+
+      Text("Primary").primaryButtonStyle()   // ✅ one modifier, reusable everywhere
+
+  SWIFTUI-016:
+    description: "@ViewBuilder used for conditional view-returning functions — not AnyView"
+    severity: MEDIUM
+    category: view_composition
+    rationale: >
+      Functions that return different view types based on conditions must
+      return an opaque or erased type. `@ViewBuilder` is preferred over `AnyView`
+      because it preserves type information for SwiftUI's diff algorithm.
+    bad_example: |
+      func statusIcon(for status: Order.Status) -> AnyView {   // ❌ type-erased
+          switch status {
+          case .pending:  return AnyView(Image(systemName: "clock"))
+          case .shipped:  return AnyView(Image(systemName: "shippingbox"))
+          case .delivered:return AnyView(Image(systemName: "checkmark"))
+          }
+      }
+    fix_example: |
+      @ViewBuilder
+      func statusIcon(for status: Order.Status) -> some View {  // ✅ type-preserved
+          switch status {
+          case .pending:   Image(systemName: "clock")
+          case .shipped:   Image(systemName: "shippingbox")
+          case .delivered: Image(systemName: "checkmark")
+          }
+      }
+
+  SWIFTUI-017:
+    description: ".overlay and .background used for decorations — ZStack reserved for true layering"
+    severity: LOW
+    category: view_composition
+    rationale: >
+      `.overlay` and `.background` communicate intent clearly (decorating a
+      primary view) and keep the primary view's layout unaffected by the decoration.
+      ZStack should be used when all layers are peers with equal layout weight.
+    bad_example: |
+      ZStack {
+          RoundedRectangle(cornerRadius: 12).fill(Color.blue)   // ❌ decoration in ZStack
+          Text("Hello")
+      }
+    fix_example: |
+      Text("Hello")
+          .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue))  // ✅ decoration
+
+      // ZStack is correct when layers are peers:
+      ZStack {
+          MapView()
+          OverlayControlsView()   // ✅ both are layout peers
+      }
+
+  SWIFTUI-018:
+    description: "Group used only for applying modifiers to multiple views — not as a layout container"
+    severity: LOW
+    category: view_composition
+    rationale: >
+      `Group` is a transparent container — it applies modifiers to multiple
+      views without adding any layout. Using it as a layout container
+      (expecting it to stack views) produces unexpected results. Use VStack,
+      HStack, or ZStack for layout.
+    bad_example: |
+      Group {            // ❌ not a layout container — views overlap
+          Text("Line 1")
+          Text("Line 2")
+      }
+    fix_example: |
+      VStack {           // ✅ explicit layout
+          Text("Line 1")
+          Text("Line 2")
+      }
+
+      // Group's correct use — applying one modifier to many views:
+      Group {
+          PrimaryButton()
+          SecondaryButton()
+          TertiaryButton()
+      }
+      .disabled(isLoading)   // ✅ modifier applied to all three
+
+# ============================================================
+# NAVIGATION
+# ============================================================
+
+  SWIFTUI-019:
+    description: "NavigationStack path drives navigation programmatically — no imperative push"
+    severity: HIGH
+    category: navigation
+    ios_minimum: "16.0"
+    rationale: >
+      Hard-coded `.navigationDestination` with Boolean toggles is fragile at scale.
+      A typed navigation `path` enables deep linking, state restoration, and
+      programmatic pop-to-root without coupling views to each other.
+    bad_example: |
+      @State var showDetail = false   // ❌ per-link boolean — doesn't scale
+
+      NavigationLink("Detail", isActive: $showDetail) {
+          DetailView()
+      }
+    fix_example: |
+      // Define route enum
+      enum AppRoute: Hashable {
+          case detail(Item)
+          case settings
+          case profile(userId: String)
+      }
+
+      // Root
+      @State private var path = NavigationPath()
+
+      NavigationStack(path: $path) {
+          HomeView(path: $path)
+              .navigationDestination(for: AppRoute.self) { route in
+                  switch route {
+                  case .detail(let item): DetailView(item: item)
+                  case .settings:         SettingsView()
+                  case .profile(let id):  ProfileView(userId: id)
+                  }
+              }
+      }
+
+      // Navigate from anywhere:
+      path.append(AppRoute.detail(selectedItem))
+
+  SWIFTUI-020:
+    description: ".sheet / .fullScreenCover presented flag owned by parent — not child"
+    severity: MEDIUM
+    category: navigation
+    rationale: >
+      Presentation state belongs to the presenting view, not the presented one.
+      A child view that controls its own presentation flag cannot be dismissed
+      by its parent and cannot participate in navigation path management.
+    bad_example: |
+      struct PaymentSheet: View {
+          @State var isPresented = true   // ❌ child controls its own presentation
+
+          var body: some View {
+              Text("Payment")
+                  .onTapGesture { isPresented = false }   // ❌ dismisses itself
+          }
+      }
+    fix_example: |
+      struct CheckoutView: View {
+          @State private var isPaymentSheetPresented = false  // ✅ parent owns the flag
+
+          var body: some View {
+              Button("Pay") { isPaymentSheetPresented = true }
+                  .sheet(isPresented: $isPaymentSheetPresented) {
+                      PaymentSheet()
+                  }
+          }
+      }
+
+      struct PaymentSheet: View {
+          @Environment(\.dismiss) var dismiss   // ✅ dismiss via environment action
+
+          var body: some View {
+              Button("Done") { dismiss() }
+          }
+      }
+
+  SWIFTUI-021:
+    description: "@Environment(\.dismiss) used instead of deprecated presentationMode"
+    severity: MEDIUM
+    category: navigation
+    rationale: >
+      `@Environment(\.presentationMode)` is deprecated in iOS 15+. The new
+      `@Environment(\.dismiss)` action is cleaner and works correctly with
+      NavigationStack, sheets, and full-screen covers.
+    bad_example: |
+      @Environment(\.presentationMode) var presentationMode  // ❌ deprecated
+
+      Button("Back") { presentationMode.wrappedValue.dismiss() }
+    fix_example: |
+      @Environment(\.dismiss) var dismiss   // ✅
+
+      Button("Back") { dismiss() }
+
+  SWIFTUI-022:
+    description: "Deep-linkable routes conform to Hashable and are handled at the NavigationStack root"
+    severity: MEDIUM
+    category: navigation
+    rationale: >
+      Deep links must decode to the same `Hashable` route type used in the
+      navigation path and be handled at a single root NavigationStack, not
+      scattered across child views.
+    fix_example: |
+      // In App entry point
+      .onOpenURL { url in
+          if let route = AppRoute(url: url) {
+              navigationPath.append(route)
+          }
+      }
+
+# ============================================================
+# LISTS & COLLECTIONS
+# ============================================================
+
+  SWIFTUI-023:
+    description: "LazyVStack / LazyHStack used for large collections instead of VStack / HStack"
+    severity: HIGH
+    category: lists_and_collections
+    rationale: >
+      `VStack` renders all child views immediately on appearance.
+      For collections of 50+ items this causes significant layout work and
+      memory usage. `LazyVStack` inside a `ScrollView` renders only visible items.
+    thresholds:
+      consider_lazy: 20
+      require_lazy: 50
+    bad_example: |
+      ScrollView {
+          VStack {                           // ❌ all 500 rows rendered at once
+              ForEach(items) { item in
+                  ItemRow(item: item)
+              }
+          }
+      }
+    fix_example: |
+      ScrollView {
+          LazyVStack(pinnedViews: .sectionHeaders) {   // ✅ renders only visible rows
+              ForEach(items) { item in
+                  ItemRow(item: item)
+              }
+          }
+      }
+
+  SWIFTUI-024:
+    description: "List used for interactive collections (swipe actions, selection) — ScrollView+LazyVStack for custom layouts"
+    severity: MEDIUM
+    category: lists_and_collections
+    rationale: >
+      `List` provides built-in swipe-to-delete, swipe actions, multi-selection,
+      edit mode, and section support essentially for free. Use `ScrollView +
+      LazyVStack` only when you need a fully custom layout that List cannot provide.
+    guidance: |
+      List       → swipe actions, selection, edit mode, grouped sections
+      ScrollView + LazyVStack → custom spacing, card layouts, non-standard row shapes
+
+  SWIFTUI-025:
+    description: "ForEach given explicitly unique stable IDs — not index-based enumeration"
+    severity: HIGH
+    category: lists_and_collections
+    rationale: >
+      Using `Array(items.enumerated())` with `\.offset` as id means every item's
+      identity is its position. Inserting or deleting items in the middle
+      causes SwiftUI to animate every subsequent item as a change, not just
+      the inserted/deleted one.
+    bad_example: |
+      ForEach(Array(items.enumerated()), id: \.offset) { index, item in
+          ItemRow(item: item)   // ❌ index-based id — incorrect animations on insert/delete
+      }
+    fix_example: |
+      ForEach(items, id: \.id) { item in   // ✅ stable UUID-based id
+          ItemRow(item: item)
+      }
+
+  SWIFTUI-026:
+    description: "ScrollViewReader.scrollTo used for programmatic scrolling — not manual offset tracking"
+    severity: LOW
+    category: lists_and_collections
+    rationale: >
+      Programmatically scrolling to a specific item (e.g. scroll to bottom on
+      new message) should use `ScrollViewReader.scrollTo`, not manual `ScrollView`
+      offset binding which requires complex geometry calculations.
+    fix_example: |
+      ScrollViewReader { proxy in
+          ScrollView {
+              LazyVStack {
+                  ForEach(messages, id: \.id) { message in
+                      MessageRow(message: message).id(message.id)
+                  }
+              }
+          }
+          .onChange(of: messages.count) { _, _ in
+              withAnimation {
+                  proxy.scrollTo(messages.last?.id, anchor: .bottom)  // ✅
+              }
+          }
+      }
+
+# ============================================================
+# LIFECYCLE & TASKS
+# ============================================================
+
+  SWIFTUI-027:
+    description: ".task(id:)" used to re-run async work when a dependency value changes"
+    severity: MEDIUM
+    category: lifecycle_and_tasks
+    rationale: >
+      `.task {}` runs once when the view appears. `.task(id: value)` re-runs
+      and cancels the previous task whenever `value` changes — ideal for
+      reloading content when a selected tab, filter, or user ID changes.
+    bad_example: |
+      .task {
+          await loadProfile(for: userId)   // ❌ doesn't re-run when userId changes
+      }
+      .onChange(of: userId) { _, newId in   // ❌ duplicating the load call
+          Task { await loadProfile(for: newId) }
+      }
+    fix_example: |
+      .task(id: userId) {            // ✅ re-runs and cancels previous when userId changes
+          await loadProfile(for: userId)
+      }
+
+  SWIFTUI-028:
+    description: ".onAppear not used for async work — use .task instead"
+    severity: MEDIUM
+    category: lifecycle_and_tasks
+    rationale: >
+      `.onAppear` is synchronous. Launching a `Task` inside it is not
+      automatically cancelled when the view disappears, potentially causing
+      state mutations on a deallocated context. `.task {}` is auto-cancelled.
+    bad_example: |
+      .onAppear {
+          Task { await viewModel.load() }   // ❌ not cancelled on disappear
+      }
+    fix_example: |
+      .task {
+          await viewModel.load()            // ✅ auto-cancelled on disappear
+      }
+
+  SWIFTUI-029:
+    description: ".onChange(of:initial:)" used with two-parameter closure (iOS 17+)"
+    severity: MEDIUM
+    category: lifecycle_and_tasks
+    ios_minimum: "17.0"
+    rationale: >
+      The iOS 16 `.onChange(of:) { newValue }` single-parameter closure is
+      deprecated in iOS 17+. The new two-parameter closure `{ oldValue, newValue }`
+      provides both old and new values without capturing state manually.
+    bad_example: |
+      .onChange(of: selectedItem) { newItem in    // ❌ deprecated in iOS 17+
+          handle(newItem)
+      }
+    fix_example: |
+      .onChange(of: selectedItem) { oldItem, newItem in   // ✅ iOS 17+
+          handle(old: oldItem, new: newItem)
+      }
+
+  SWIFTUI-030:
+    description: ".refreshable used for pull-to-refresh — no custom gesture for this pattern"
+    severity: LOW
+    category: lifecycle_and_tasks
+    rationale: >
+      Pull-to-refresh is a standard iOS affordance. `.refreshable` provides
+      the system spinner, correct inset behaviour, and async/await support
+      for free. Custom gesture-based implementations miss accessibility and
+      feel inconsistent with system apps.
+    fix_example: |
+      List(items) { item in ItemRow(item: item) }
+          .refreshable {
+              await viewModel.reload()   // ✅ system spinner shown automatically
+          }
+
+# ============================================================
+# VIEW IDENTITY
+# ============================================================
+
+  SWIFTUI-031:
+    description: ".id() modifier used to force view re-creation — not to work around bugs"
+    severity: MEDIUM
+    category: view_identity
+    rationale: >
+      `.id(value)` destroys and recreates the view when `value` changes,
+      resetting all @State. It is useful for intentional resets (form clear,
+      user switch) but should not be used to work around unexpected state bugs —
+      investigate the root cause instead.
+    guidance: |
+      Correct use of .id():
+        - Reset a form after submission: .id(submissionCount)
+        - Re-initialise a view for a different user: .id(userId)
+        - Force animation reset: .id(animationTrigger)
+
+      Wrong use of .id():
+        - "The view isn't updating correctly" → investigate why state isn't changing
+        - "The animation looks wrong" → use .animation(_:value:) correctly
+    fix_example: |
+      // ✅ Intentional form reset after submission
+      NewPostForm(draft: draft)
+          .id(submissionToken)   // new token on submit → form resets cleanly
+
+  SWIFTUI-032:
+    description: "Stable view identity maintained — avoid using random or time-based IDs"
+    severity: HIGH
+    category: view_identity
+    rationale: >
+      Using `UUID()` or `Date()` as a view id in a `ForEach` or `.id()` modifier
+      that evaluates on each render creates new identity every time, forcing
+      SwiftUI to destroy and recreate views on every render cycle.
+    bad_example: |
+      ForEach(items, id: \.self) { item in
+          ItemView(item: item).id(UUID())   // ❌ new UUID every render — constant recreate
+      }
+    fix_example: |
+      ForEach(items, id: \.id) { item in
+          ItemView(item: item)              // ✅ stable identity from item.id
+      }
+
+  SWIFTUI-033:
+    description: "Conditional view insertion preferred over opacity/hidden for showing/hiding"
+    severity: LOW
+    category: view_identity
+    rationale: >
+      `.opacity(0)` and `.hidden()` keep the view in the hierarchy, consuming
+      memory and layout space. Conditional `if` removes the view entirely.
+      Use opacity/hidden only when you need the view to reserve its space.
+    guidance: |
+      Remove from hierarchy (free layout space + memory):
+          if isVisible { MyView() }
+
+      Reserve layout space but hide visually:
+          MyView().opacity(isVisible ? 1 : 0)
+
+      Reserve space + hide from accessibility:
+          MyView().hidden()
+
+# ============================================================
+# IMAGES & MEDIA
+# ============================================================
+
+  SWIFTUI-034:
+    description: "AsyncImage includes placeholder and failure states — not just the success case"
+    severity: HIGH
+    category: images_and_media
+    rationale: >
+      An `AsyncImage` without explicit placeholder and failure states shows
+      nothing while loading and silently shows nothing on failure. Users
+      are left looking at blank spaces with no feedback.
+    bad_example: |
+      AsyncImage(url: avatarURL) { image in
+          image.resizable()   // ❌ no loading or failure state
+      }
+    fix_example: |
+      AsyncImage(url: avatarURL) { phase in
+          switch phase {
+          case .empty:
+              ProgressView()                              // ✅ loading state
+          case .success(let image):
+              image.resizable().scaledToFill()            // ✅ success
+          case .failure:
+              Image(systemName: "person.circle.fill")     // ✅ failure fallback
+                  .foregroundStyle(.secondary)
+          @unknown default:
+              EmptyView()
+          }
+      }
+
+  SWIFTUI-035:
+    description: "Image(uiImage:) / Image(decorative:) used appropriately for context"
+    severity: LOW
+    category: images_and_media
+    rationale: >
+      `Image("name")` looks up a named asset. `Image(uiImage:)` wraps a UIImage.
+      `Image(decorative: "name")` marks the image as decorative (hides from
+      VoiceOver) without needing `.accessibilityHidden(true)` separately.
+    fix_example: |
+      Image(decorative: "background-texture")   // ✅ decorative — hidden from VoiceOver
+      Image("app-logo").accessibilityLabel("App Logo")  // ✅ informative — labelled
+
+  SWIFTUI-036:
+    description: ".resizable() always paired with .scaledToFit() or .scaledToFill()"
+    severity: MEDIUM
+    category: images_and_media
+    rationale: >
+      `.resizable()` alone removes the image's intrinsic size but doesn't specify
+      the scaling behaviour, causing images to fill their entire container and
+      distort if no scaling modifier follows.
+    bad_example: |
+      Image("hero")
+          .resizable()                    // ❌ no scaling — distorts or fills container
+          .frame(width: 100, height: 100)
+    fix_example: |
+      Image("hero")
+          .resizable()
+          .scaledToFill()                 // ✅ maintains aspect ratio, clips to frame
+          .frame(width: 100, height: 100)
+          .clipped()
+
+# ============================================================
+# GESTURES
+# ============================================================
+
+  SWIFTUI-037:
+    description: ".simultaneousGesture used when parent and child both need gesture recognition"
+    severity: MEDIUM
+    category: gestures
+    rationale: >
+      By default, child gestures take priority over parent gestures — the parent
+      never fires when a child handles the gesture. `.simultaneousGesture` on the
+      parent allows both to fire, which is the correct behaviour for
+      analytics tracking or multi-level interactions.
+    bad_example: |
+      ScrollView {
+          ForEach(items) { item in
+              ItemRow(item: item)
+                  .onTapGesture { select(item) }   // ❌ parent scroll gesture suppressed
+          }
+      }
+      .onTapGesture { trackScrollAreaTap() }        // ❌ never fires
+    fix_example: |
+      ScrollView {
+          ForEach(items) { item in
+              ItemRow(item: item)
+                  .onTapGesture { select(item) }
+          }
+      }
+      .simultaneousGesture(
+          TapGesture().onEnded { trackScrollAreaTap() }   // ✅ both fire
+      )
+
+  SWIFTUI-038:
+    description: ".highPriorityGesture used when parent must take precedence over child"
+    severity: MEDIUM
+    category: gestures
+    rationale: >
+      Use `.highPriorityGesture` when the parent's gesture should win over a
+      child's, for example a custom drag-to-dismiss that should override
+      internal scrolling or tapping.
+    fix_example: |
+      ModalContainer()
+          .highPriorityGesture(
+              DragGesture()
+                  .onEnded { if $0.translation.height > 100 { dismiss() } }
+          )
+
+  SWIFTUI-039:
+    description: "Custom gesture recognizers use GestureState for transient state — not @State"
+    severity: LOW
+    category: gestures
+    rationale: >
+      `@GestureState` automatically resets to its initial value when the gesture
+      ends. Using `@State` for gesture tracking requires manual reset in
+      `.onEnded`, which is easy to forget and causes stale state.
+    bad_example: |
+      @State var dragOffset = CGSize.zero   // ❌ must manually reset in .onEnded
+
+      .gesture(
+          DragGesture()
+              .onChanged { dragOffset = $0.translation }
+              .onEnded { _ in dragOffset = .zero }   // ❌ easy to forget
+      )
+    fix_example: |
+      @GestureState var dragOffset = CGSize.zero   // ✅ auto-resets on gesture end
+
+      .gesture(
+          DragGesture()
+              .updating($dragOffset) { value, state, _ in state = value.translation }
+      )
+
+# ============================================================
+# PREVIEWS
+# ============================================================
+
+  SWIFTUI-040:
+    description: "#Preview macro provided for every new View (iOS 17+) or PreviewProvider (iOS 15-16)"
+    severity: MEDIUM
+    category: previews
+    rationale: >
+      Views without previews cannot be developed in isolation using Xcode Canvas.
+      Previews also act as living documentation of a view's configuration options.
+    fix_example: |
+      // iOS 17+ — #Preview macro
+      #Preview("Light Mode") {
+          ProductCard(product: .mock)
+              .preferredColorScheme(.light)
+      }
+
+      #Preview("Dark Mode") {
+          ProductCard(product: .mock)
+              .preferredColorScheme(.dark)
+      }
+
+      // iOS 15–16 — PreviewProvider
+      struct ProductCard_Previews: PreviewProvider {
+          static var previews: some View {
+              ProductCard(product: .mock)
+                  .previewLayout(.sizeThatFits)
+          }
+      }
+
+  SWIFTUI-041:
+    description: "Previews cover multiple states — empty, loading, error, and populated"
+    severity: LOW
+    category: previews
+    rationale: >
+      A preview that only shows the happy path misses regressions in edge
+      states. Cover all meaningful states the view can be in.
+    fix_example: |
+      #Preview("Loading") {
+          OrderListView(state: .loading)
+      }
+
+      #Preview("Empty") {
+          OrderListView(state: .empty)
+      }
+
+      #Preview("Error") {
+          OrderListView(state: .error("Network unavailable"))
+      }
+
+      #Preview("Populated") {
+          OrderListView(state: .loaded(orders: Order.mocks))
+      }
+
+# ============================================================
+# MODERN APIs
+# ============================================================
+
+  SWIFTUI-042:
+    description: ".searchable used for search bars — not custom TextField + magnifying glass"
+    severity: LOW
+    category: modern_apis
+    ios_minimum: "15.0"
+    rationale: >
+      `.searchable` provides the correct system search bar, keyboard toolbar,
+      search suggestions, scope buttons, and correct placement above navigation
+      lists. Custom implementations miss system affordances and look inconsistent.
+    fix_example: |
+      @State private var searchText = ""
+
+      NavigationStack {
+          List(filteredItems) { item in ItemRow(item: item) }
+              .searchable(text: $searchText, prompt: "Search orders")
+              .onChange(of: searchText) { _, query in viewModel.search(query) }
+      }
+
+  SWIFTUI-043:
+    description: "ContentUnavailableView used for empty/error states (iOS 17+)"
+    severity: LOW
+    category: modern_apis
+    ios_minimum: "17.0"
+    rationale: >
+      The system `ContentUnavailableView` provides a consistent, accessible
+      empty/error state with icon, title, and description — matching the
+      visual language of system apps.
+    fix_example: |
+      if items.isEmpty {
+          ContentUnavailableView(
+              "No Orders",
+              systemImage: "cart",
+              description: Text("Your past orders will appear here.")
+          )
+      }
+
+      // For search with no results — system provides the "No Results" UI:
+      ContentUnavailableView.search(text: searchText)
+
+  SWIFTUI-044:
+    description: ".sensoryFeedback used for haptic feedback (iOS 17+) — not UIImpactFeedbackGenerator"
+    severity: LOW
+    category: modern_apis
+    ios_minimum: "17.0"
+    rationale: >
+      `.sensoryFeedback` is the SwiftUI-native haptic API. It's declarative,
+      testable in previews, and works on all Apple platforms.
+      `UIImpactFeedbackGenerator` is UIKit and cannot be called safely off the main thread.
+    bad_example: |
+      let generator = UIImpactFeedbackGenerator(style: .medium)
+      generator.impactOccurred()   // ❌ UIKit, imperative
+    fix_example: |
+      Button("Submit") { submitOrder() }
+          .sensoryFeedback(.success, trigger: isSubmitted)   // ✅ declarative
+
+  SWIFTUI-045:
+    description: "matchedGeometryEffect namespace scoped to the hosting view — not global"
+    severity: MEDIUM
+    category: modern_apis
+    rationale: >
+      `matchedGeometryEffect` pairs views across an animation using a shared
+      namespace. A `@Namespace` defined at app level causes unintended pairing
+      between unrelated views in different parts of the hierarchy.
+    bad_example: |
+      // ❌ Global namespace — all views in the app share the same geometry space
+      struct AppNamespace {
+          static var shared = Namespace()
+      }
+    fix_example: |
+      struct HeroTransitionView: View {
+          @Namespace private var heroAnimation   // ✅ scoped to this view and its children
+
+          var body: some View {
+              if isExpanded {
+                  DetailCard()
+                      .matchedGeometryEffect(id: "hero", in: heroAnimation)
+              } else {
+                  ThumbnailCard()
+                      .matchedGeometryEffect(id: "hero", in: heroAnimation)
+              }
+          }
+      }
+
+  SWIFTUI-046:
+    description: "TimelineView used for clock/timer displays — not Timer.publish"
+    severity: LOW
+    category: modern_apis
+    ios_minimum: "15.0"
+    rationale: >
+      `TimelineView` is the SwiftUI-native way to redraw a view on a schedule.
+      `Timer.publish` requires a Combine subscription with a cancellable,
+      which adds boilerplate. TimelineView is more concise and integrates
+      with the system display refresh properly.
+    bad_example: |
+      @State var currentTime = Date()
+
+      let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+      Text(currentTime, style: .time)
+          .onReceive(timer) { currentTime = $0 }   // ❌ Combine overhead for simple clock
+    fix_example: |
+      TimelineView(.periodic(from: .now, by: 1)) { context in   // ✅ no Combine needed
+          Text(context.date, style: .time)
+      }
+
+# ============================================================
+# COLORS & ASSETS
+# ============================================================
+
+  SWIFTUI-047:
+    description: "Colors defined in Asset Catalog — not hardcoded hex or UIColor literals"
+    severity: MEDIUM
+    category: colors_and_assets
+    rationale: >
+      Asset Catalog colors support light/dark mode variants, high-contrast
+      variants, and per-device gamut configurations automatically.
+      Hardcoded colors require manual dark-mode conditionals everywhere.
+    bad_example: |
+      Text("Hello")
+          .foregroundStyle(Color(hex: "#2C3E50"))   // ❌ no dark mode variant
+    fix_example: |
+      Text("Hello")
+          .foregroundStyle(Color("TextPrimary"))     // ✅ Asset Catalog color with dark variant
+
+      // Or via extension for type safety:
+      extension Color {
+          static let textPrimary = Color("TextPrimary")
+      }
+      Text("Hello").foregroundStyle(.textPrimary)
+
+  SWIFTUI-048:
+    description: "Semantic system colors used for text and backgrounds — not fixed colors"
+    severity: MEDIUM
+    category: colors_and_assets
+    rationale: >
+      System semantic colors (`.primary`, `.secondary`, `Color(.systemBackground)`,
+      `Color(.label)`) automatically adapt to light/dark mode and high-contrast
+      without any conditional logic. Fixed colors break in dark mode or high-contrast mode.
+    bad_example: |
+      Text("Description")
+          .foregroundStyle(Color.black)           // ❌ invisible in dark mode
+          .background(Color.white)                // ❌ harsh in dark mode
+    fix_example: |
+      Text("Description")
+          .foregroundStyle(.secondary)            // ✅ adapts to dark/light/contrast
+          .background(Color(.systemBackground))   // ✅ system background color

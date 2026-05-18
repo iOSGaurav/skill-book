@@ -1,0 +1,146 @@
+---
+# VIPER View Layer Rules
+# Responsibility: UI rendering only — receives data from Presenter, delegates events back
+
+rule_set:
+  id: viper_view
+  name: VIPER — View Layer
+  description: >
+    Rules for the View layer in VIPER. The View is a passive UI component:
+    it renders what the Presenter tells it to display and forwards user
+    events to the Presenter. It must never access the Interactor directly
+    or contain any business or navigation logic.
+  enabled: always
+  layer: View
+  naming_patterns: ["*View", "*ViewController", "*DisplayLogic"]
+
+checks:
+
+  VIEW-001:
+    description: View only renders data received from Presenter — no transforms
+    severity: HIGH
+    rationale: >
+      Data formatting and transformation belong in the Presenter. The View
+      should receive ready-to-display strings, colors, and flags — not raw
+      domain objects it must interpret.
+    bad_example: |
+      // ❌ View formatting price (Presenter's job)
+      func displayOrder(_ order: Order) {
+          priceLabel.text = String(format: "$%.2f", order.price * (1 - order.discount))
+      }
+    fix_example: |
+      // ✅ Presenter sends ready-to-display string
+      func displayOrder(_ viewModel: OrderViewModel) {
+          priceLabel.text = viewModel.formattedPrice   // "already formatted by Presenter"
+      }
+
+  VIEW-002:
+    description: View delegates all user actions to Presenter via protocol
+    severity: HIGH
+    rationale: >
+      The View must not decide what happens when a button is tapped.
+      It informs the Presenter and lets the Presenter decide.
+    bad_example: |
+      @IBAction func loginTapped(_ sender: UIButton) {
+          let user = try? AuthService.shared.login(email, password)  // ❌ business logic in View
+          navigateToHome()
+      }
+    fix_example: |
+      @IBAction func loginTapped(_ sender: UIButton) {
+          presenter?.loginTapped(email: emailField.text, password: passwordField.text)  // ✅
+      }
+
+  VIEW-003:
+    description: View has zero direct Interactor access
+    severity: CRITICAL
+    rationale: >
+      The View should not know the Interactor exists. Direct View → Interactor
+      calls bypass the Presenter, break the contract, and make the Presenter untestable.
+    detection: >
+      Search the View file for any Interactor protocol type references or
+      direct method calls on an Interactor property.
+    bad_example: |
+      class LoginViewController: UIViewController {
+          var interactor: LoginInteractorProtocol?   // ❌ View holds Interactor reference
+
+          @IBAction func loginTapped() {
+              interactor?.performLogin(email, password)  // ❌ bypasses Presenter
+          }
+      }
+    fix_example: |
+      class LoginViewController: UIViewController {
+          var presenter: LoginPresenterProtocol?   // ✅ View only knows Presenter
+
+          @IBAction func loginTapped() {
+              presenter?.loginTapped(email: emailField.text, password: passwordField.text)
+          }
+      }
+
+  VIEW-004:
+    description: View protocol (ViewProtocol) defined; Presenter holds weak var view
+    severity: HIGH
+    rationale: >
+      Without a protocol, the Presenter is tightly coupled to the concrete View class,
+      making Presenter unit tests require a real UIViewController. The weak reference
+      prevents a retain cycle (View owns Presenter; Presenter must not own View).
+    fix_example: |
+      protocol LoginViewProtocol: AnyObject {
+          func showLoginError(_ message: String)
+          func navigateToHome()
+      }
+
+      class LoginPresenter {
+          weak var view: LoginViewProtocol?   // ✅ weak to break retain cycle
+      }
+
+      class LoginViewController: UIViewController, LoginViewProtocol {
+          var presenter: LoginPresenterProtocol?
+      }
+
+  VIEW-005:
+    description: View has no network or database calls
+    severity: CRITICAL
+    rationale: >
+      Data fetching belongs in the Interactor. A View with network calls
+      is untestable as a UI component and violates VIPER's single-responsibility.
+    bad_example: |
+      override func viewDidAppear(_ animated: Bool) {
+          super.viewDidAppear(animated)
+          Firestore.firestore().collection("users").getDocuments { ... }  // ❌ in View
+      }
+    fix_example: |
+      override func viewDidAppear(_ animated: Bool) {
+          super.viewDidAppear(animated)
+          presenter?.viewDidAppear()   // ✅ View tells Presenter; Interactor fetches
+      }
+
+  VIEW-006:
+    description: View has no navigation logic — no push, present, or dismiss
+    severity: HIGH
+    rationale: >
+      Navigation belongs in the Router. The View should call a Router/Presenter
+      method that triggers navigation, never navigate directly.
+    bad_example: |
+      func onLoginSuccess() {
+          let vc = HomeBuilder.build()
+          navigationController?.pushViewController(vc, animated: true)  // ❌ View navigates
+      }
+    fix_example: |
+      func onLoginSuccess() {
+          presenter?.loginSucceeded()   // ✅ Presenter delegates to Router
+      }
+
+  VIEW-007:
+    description: View holds Presenter as var presenter — typed to PresenterProtocol
+    severity: MEDIUM
+    rationale: >
+      Typing the presenter property to the concrete class couples the View
+      to the implementation. Using the protocol allows mock injection in tests.
+    bad_example: |
+      class LoginViewController: UIViewController {
+          var presenter: LoginPresenter?    // ❌ concrete type
+      }
+    fix_example: |
+      class LoginViewController: UIViewController {
+          var presenter: LoginPresenterProtocol?  // ✅ protocol type
+      }
